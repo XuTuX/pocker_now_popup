@@ -15,7 +15,6 @@ const PREMIUM_DEFAULT = ['AA', 'KK', 'QQ', 'JJ', 'AKs', 'AKo'];
 const DEFAULT_SETTINGS = {
   enabled: true,
   soundEnabled: true,
-  notificationEnabled: true,
   hands: [...PREMIUM_DEFAULT]
 };
 

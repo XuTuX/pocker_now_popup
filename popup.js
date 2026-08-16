@@ -17,7 +17,6 @@ const QUICK_HANDS = [
 const DEFAULT_SETTINGS = {
   enabled: true,
   soundEnabled: true,
-  notificationEnabled: true,
   hands: ['AA', 'KK', 'QQ', 'JJ', 'AKs', 'AKo']
 };
 
@@ -38,7 +37,6 @@ function load() {
 function render() {
   el('enabled').checked = settings.enabled;
   el('soundEnabled').checked = settings.soundEnabled;
-  el('notificationEnabled').checked = settings.notificationEnabled;
   el('statusText').textContent = settings.enabled ? 'ON' : 'OFF';
   el('statusText').style.color = settings.enabled ? '#7ee787' : '#f85149';
 
@@ -93,7 +91,6 @@ function save() {
   settings = {
     enabled: el('enabled').checked,
     soundEnabled: el('soundEnabled').checked,
-    notificationEnabled: el('notificationEnabled').checked,
     hands: checked
   };
 

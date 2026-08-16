@@ -1,13 +1,10 @@
 {
   "manifest_version": 3,
   "name": "PokerNow Hand Alert",
-  "version": "1.0.0",
-  "description": "PokerNow 테이블에서 내 홀카드를 읽어, 미리 지정한 프리미엄 핸드가 들어왔을 때만 알림과 알림음을 발생시킵니다. (자동 액션 없음 / 감지 + 알림 전용)",
+  "version": "1.1.0",
+  "description": "PokerNow 테이블에서 내 홀카드를 읽어 화면 오버레이로 현재 패/프리미엄/내 차례/콜 정보를 보여줍니다. (감지·표시 전용, 자동 액션 없음)",
 
-  "permissions": [
-    "storage",
-    "notifications"
-  ],
+  "permissions": ["storage"],
 
   "host_permissions": [
     "https://www.pokernow.club/*",
@@ -16,23 +13,15 @@
     "https://pokernow.com/*"
   ],
 
-  "background": {
-    "service_worker": "background.js"
-  },
-
   "action": {
     "default_popup": "popup.html",
     "default_title": "PokerNow Hand Alert",
-    "default_icon": {
-      "128": "icon128.png"
-    }
+    "default_icon": { "128": "icon128.png" }
   },
 
   "options_page": "options.html",
 
-  "icons": {
-    "128": "icon128.png"
-  },
+  "icons": { "128": "icon128.png" },
 
   "content_scripts": [
     {
