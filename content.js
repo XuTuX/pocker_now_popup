@@ -36,6 +36,9 @@
   // 블라인드 표시(콜 → BB 환산용)
   const BLIND_SELECTORS = ['.blind-value', '.blind-value-ctn'];
 
+  // 커뮤니티 카드(보드: 플롭/턴/리버) 컨테이너 후보
+  const BOARD_SELECTORS = ['.table-cards', '.community-cards', '.board-cards', '.table-cards-ctn', '.community', '.board'];
+
   const FOLD_HOTKEY = 'f'; // '' 로 두면 단축키 끔
 
   const THROTTLE_MS = 600;   // 변경 폭주 시에도 이 간격으로는 반드시 검사
@@ -47,7 +50,8 @@
   /* ===== 상태 & 설정 ====================================================== */
 
   let settings = defaultSettings();
-  let lastRawKey = null; // 마지막 감지 카드 키 (새 핸드 판별)
+  let lastRawKey = null;     // 마지막 감지 카드 키 (새 핸드 판별)
+  let preFoldArmed = false;  // 내가 "미리 폴드"를 예약했는지 (취소 가능)
   let audioCtx = null;
 
   function defaultSettings() {
@@ -186,14 +190,130 @@
 
   const prettyCard = (c) => c.rank + ({ s: '♠', h: '♥', d: '♦', c: '♣' }[c.suit] || c.suit);
 
+  /* ===== 보드(커뮤니티 카드) 읽기 & 족보 계산 ============================ */
+
+  // 랭크 문자('2'~'A') → 숫자(2~14) / 숫자 → 문자
+  const RANK_NUM = (r) => RANK_ORDER[r] + 2;
+  const NUM_RANK = (n) => ({ 14:'A',13:'K',12:'Q',11:'J',10:'T' }[n] || String(n));
+
+  // 요소 목록 → 앞면 카드 { rank, suit } 배열 (같은 카드 중복 제거)
+  function parseCardList(nodeList) {
+    const seen = new Set(), out = [];
+    for (const el of nodeList) {
+      if (!looksLikeCard(el)) continue;
+      const c = parseCardElement(el);
+      if (!c) continue;
+      const k = c.rank + c.suit;
+      if (seen.has(k)) continue;   // 카드-컨테이너/카드 중복 & 물리적 중복 방지
+      seen.add(k); out.push(c);
+    }
+    return out;
+  }
+
+  // 보드 카드(3~5장)를 읽는다. holeKeys = 내 홀카드 키 Set (보드에서 제외).
+  function readBoardCards(holeKeys) {
+    // 1) 명시적 보드 컨테이너 우선
+    for (const sel of BOARD_SELECTORS) {
+      const ctn = document.querySelector(sel);
+      if (!ctn) continue;
+      const cards = parseCardList(ctn.querySelectorAll('.card-container, .card'))
+        .filter((c) => !holeKeys.has(c.rank + c.suit));
+      if (cards.length >= 3 && cards.length <= 5) return cards;
+    }
+    // 2) 폴백: 페이지 전체 앞면 카드 − 내 홀카드 = 보드 (컨테이너 클래스 무관)
+    const all = parseCardList(document.querySelectorAll('.card-container, .card'))
+      .filter((c) => !holeKeys.has(c.rank + c.suit));
+    if (all.length >= 3 && all.length <= 5) return all;
+    return []; // 프리플롭이거나 감지 실패
+  }
+
+  // 카드 배열(숫자 랭크) → 최고 족보 { cat, high, kick }
+  //   cat: 8 스트플 · 7 포카드 · 6 풀하우스 · 5 플러시 · 4 스트레이트
+  //        3 트리플 · 2 투페어 · 1 원페어 · 0 하이카드
+  function evalMade(cards) {
+    const rc = {}, sc = {};
+    for (const c of cards) { rc[c.r] = (rc[c.r] || 0) + 1; (sc[c.s] = sc[c.s] || []).push(c.r); }
+    const ranks = cards.map((c) => c.r);
+
+    const straightHigh = (arr) => {
+      const set = new Set(arr);
+      if (set.has(14)) set.add(1); // A-2-3-4-5(휠)
+      const s = [...set].sort((a, b) => b - a);
+      let run = 1;
+      for (let i = 0; i < s.length - 1; i++) {
+        if (s[i] - 1 === s[i + 1]) { run++; if (run >= 5) return s[i - 3]; }
+        else run = 1;
+      }
+      return 0;
+    };
+
+    let flushSuit = null;
+    for (const s in sc) if (sc[s].length >= 5) flushSuit = s;
+    if (flushSuit) { const h = straightHigh(sc[flushSuit]); if (h) return { cat: 8, high: h }; }
+
+    const byN = (n) => Object.keys(rc).map(Number).filter((r) => rc[r] === n).sort((a, b) => b - a);
+    const quads = byN(4), trips = byN(3), pairs = byN(2);
+    const uniq = [...new Set(ranks)].sort((a, b) => b - a);
+
+    if (quads.length) return { cat: 7, high: quads[0], kick: uniq.find((r) => r !== quads[0]) || 0 };
+    if (trips.length && (pairs.length || trips.length >= 2))
+      return { cat: 6, high: trips[0], kick: trips.length >= 2 ? trips[1] : pairs[0] };
+    if (flushSuit) return { cat: 5, high: sc[flushSuit].slice().sort((a, b) => b - a)[0] };
+    const st = straightHigh(ranks);
+    if (st) return { cat: 4, high: st };
+    if (trips.length) return { cat: 3, high: trips[0] };
+    if (pairs.length >= 2) return { cat: 2, high: pairs[0], kick: pairs[1] };
+    if (pairs.length === 1) return { cat: 1, high: pairs[0], kick: uniq.find((r) => r !== pairs[0]) || 0 };
+    return { cat: 0, high: uniq[0], kick: uniq[1] || 0 };
+  }
+
+  const MADE_NAMES = {
+    8: '스트레이트 플러시', 7: '포카드', 6: '풀하우스', 5: '플러시',
+    4: '스트레이트', 3: '트리플', 2: '투페어', 1: '원페어', 0: '하이카드'
+  };
+
+  // 홀카드 2장 + 보드 → 사람이 읽을 족보 { name, klass, usesHole }
+  function describeMade(c1, c2, board) {
+    const toN = (c) => ({ r: RANK_NUM(c.rank), s: c.suit });
+    const all = [c1, c2, ...board].map(toN);
+    const m = evalMade(all);
+    const b = evalMade(board.map(toN)); // 보드만으로도 같은 족보면 = "보드 플레이"
+
+    let name = MADE_NAMES[m.cat];
+    if (m.cat === 8 && m.high === 14) name = '로열 플러시';
+    const hi = NUM_RANK(m.high), kk = NUM_RANK(m.kick);
+    if (m.cat === 2) name += ' ' + hi + '·' + kk;        // 투페어 K·9
+    else if (m.cat === 6) name += ' ' + hi + '/' + kk;   // 풀하우스 K/9
+    else if (m.cat === 4 || m.cat === 8) name += ' ' + hi + ' high';
+    else name += ' ' + hi;                                // 원페어 K, 트리플 8, 하이카드 A …
+
+    const sameTuple = m.cat === b.cat && m.high === b.high && (m.kick || 0) === (b.kick || 0);
+    const klass = m.cat >= 4 ? 'made-strong' : m.cat >= 1 ? 'made-mid' : 'made-weak';
+    return { name, klass, usesHole: !sameTuple };
+  }
+
   /* ===== 게임 상태 읽기: 내 차례 / 폴드 / 콜 정보 ========================= */
 
+  // 내 액션 차례 = 내 자리에 'decision-current' 클래스가 있을 때만 (그 외엔 아님).
   function isMyTurn() {
     for (const sel of HERO_CONTAINER_SELECTORS) {
       const hero = document.querySelector(sel);
-      if (hero && (hero.className || '').toString().includes('decision-current')) return true;
+      if (hero && / decision-current /.test(' ' + (hero.className || '') + ' ')) return true;
     }
-    return !!document.querySelector('.game-decisions-ctn .action-buttons, .action-signal');
+    return false;
+  }
+
+  // 사전 액션 "폴드"가 예약(활성)되어 있는지 DOM 에서 감지.
+  //  ★ 예약 표시가 안 맞으면 아래 정규식(활성 클래스)을 조정하세요. ★
+  const FOLD_ARMED_RE = /\b(active|selected|highlighted|pre-?selected|checked|is-active|toggled)\b/;
+  function isFoldArmedInDom() {
+    const btns = document.querySelectorAll('.action-button, button, [role="button"]');
+    for (const b of btns) {
+      if (!(b.textContent || '').trim().toLowerCase().includes('fold')) continue;
+      const cls = ' ' + (b.className || '').toString().toLowerCase() + ' ';
+      if (FOLD_ARMED_RE.test(cls) || b.getAttribute('aria-pressed') === 'true') return true;
+    }
+    return false;
   }
 
   // 내가 이번 핸드에서 폴드(죽음)했는지
@@ -253,42 +373,56 @@
 
     ensureOverlay();
 
-    // 폴드했으면 카드 지움
+    // 폴드했으면 카드 지움 (예약 상태도 초기화)
     if (isHeroFolded()) {
-      lastRawKey = null;
-      renderOverlay({ hasCards: false, folded: true, myTurn: false, action: null });
+      lastRawKey = null; preFoldArmed = false;
+      renderOverlay({ hasCards: false, folded: true, myTurn: false, foldArmed: false, action: null });
       return;
     }
 
     const myTurn = isMyTurn();
+    if (myTurn) preFoldArmed = false; // 내 차례엔 즉시 폴드(예약 개념 없음)
     const action = myTurn ? getActionInfo() : null;
     const els = findHoleCardElements();
 
     if (els.length !== 2) {
-      lastRawKey = null;
-      renderOverlay({ hasCards: false, myTurn, action });
+      lastRawKey = null; preFoldArmed = false;
+      renderOverlay({ hasCards: false, myTurn, foldArmed: false, action });
       return;
     }
 
     const c1 = parseCardElement(els[0]);
     const c2 = parseCardElement(els[1]);
     const hand = normalizeHand(c1, c2);
-    if (!hand) { renderOverlay({ hasCards: false, myTurn, action }); return; }
+    if (!hand) { renderOverlay({ hasCards: false, myTurn, foldArmed: false, action }); return; }
 
     const allowed = settings.hands.includes(hand);
-    const isNewHand = [prettyCard(c1), prettyCard(c2)].sort().join('|') !== lastRawKey;
+    const key = [prettyCard(c1), prettyCard(c2)].sort().join('|');
+    const isNewHand = key !== lastRawKey;
+    if (isNewHand) preFoldArmed = false;
+
+    const foldArmed = !myTurn && (preFoldArmed || isFoldArmedInDom());
+
+    // 보드가 깔렸으면(플롭 이후) 현재 완성된 족보 계산
+    const holeKeys = new Set([c1.rank + c1.suit, c2.rank + c2.suit]);
+    const board = readBoardCards(holeKeys);
+    const made = board.length >= 3 ? describeMade(c1, c2, board) : null;
+    const boardPretty = board.map(prettyCard);
 
     renderOverlay({
       hasCards: true, pretty1: prettyCard(c1), pretty2: prettyCard(c2),
-      hand, allowed, myTurn, action
+      hand, allowed, myTurn, foldArmed, action, made, boardPretty
     });
 
     safe(() => chrome.storage.local.set({
-      currentHand: { pretty: prettyCard(c1) + ' ' + prettyCard(c2), hand, allowed, myTurn, ts: Date.now() }
+      currentHand: {
+        pretty: prettyCard(c1) + ' ' + prettyCard(c2),
+        hand, allowed, myTurn, made: made ? made.name : null, ts: Date.now()
+      }
     }));
 
     if (!isNewHand) return;
-    lastRawKey = [prettyCard(c1), prettyCard(c2)].sort().join('|');
+    lastRawKey = key;
     log('새 핸드:', prettyCard(c1), prettyCard(c2), '→', hand, allowed ? '(프리미엄!)' : '');
     if (allowed && settings.soundEnabled) playBeep();
   }
@@ -316,10 +450,12 @@
     #${OVERLAY_ID} .pnha-cards.empty{font-size:14px;font-weight:600;color:#9aa0b4;letter-spacing:0;}
     #${OVERLAY_ID} .pnha-red{color:#ff5c72;}
     #${OVERLAY_ID} .pnha-code{font-size:14px;color:#9aa0b4;margin-top:2px;font-weight:700;}
-    #${OVERLAY_ID} .pnha-tag{display:inline-block;margin-top:6px;font-size:11px;font-weight:700;
-      padding:2px 10px;border-radius:10px;background:#3a3d4d;color:#cfd2e0;}
+    #${OVERLAY_ID} .pnha-made{margin-top:5px;font-size:15px;font-weight:800;color:#e8e8ee;}
+    #${OVERLAY_ID} .pnha-made.made-strong{color:#7ee787;}
+    #${OVERLAY_ID} .pnha-made.made-mid{color:#f0d24b;}
+    #${OVERLAY_ID} .pnha-made.made-weak{color:#9aa0b4;}
+    #${OVERLAY_ID} .pnha-board{margin-top:4px;font-size:15px;font-weight:800;letter-spacing:1px;color:#e8e8ee;}
     #${OVERLAY_ID}.premium{border-color:#2ea043;box-shadow:0 0 0 2px #2ea043,0 8px 28px rgba(0,0,0,.5);}
-    #${OVERLAY_ID}.premium .pnha-tag{background:#2ea043;color:#fff;}
     #${OVERLAY_ID} .pnha-turn{margin-top:8px;font-size:12px;font-weight:700;color:#9aa0b4;}
     #${OVERLAY_ID}.my-turn .pnha-turn{color:#1e1f26;background:#f0a531;border-radius:8px;padding:3px;}
     #${OVERLAY_ID} .pnha-call{margin-top:7px;font-size:13px;font-weight:800;color:#e8e8ee;display:none;}
@@ -329,6 +465,8 @@
     #${OVERLAY_ID} .pnha-fold{margin-top:8px;width:100%;padding:9px;border:none;border-radius:8px;
       background:#b3242f;color:#fff;font-weight:800;font-size:14px;cursor:pointer;}
     #${OVERLAY_ID} .pnha-fold:hover{background:#d0303c;}
+    #${OVERLAY_ID} .pnha-fold.armed{background:#3a3d4d;color:#cfd2e0;box-shadow:none;}
+    #${OVERLAY_ID} .pnha-fold.armed:hover{background:#474a5c;}
     #${OVERLAY_ID}.collapsed .pnha-body{display:none;}
     #${OVERLAY_ID} .pnha-foldmsg{font-size:10px;color:#9aa0b4;margin-top:5px;height:12px;}
   `;
@@ -351,27 +489,35 @@
     box.innerHTML = `
       <div class="pnha-head"><span>♠ Hand Alert</span>${headBtns}</div>
       <div class="pnha-body">
-        <div class="pnha-cards empty">패 대기중…</div>
-        <div class="pnha-code"></div>
-        <div><span class="pnha-tag">-</span></div>
-        <div class="pnha-turn">대기 중</div>
+        <div class="pnha-cards empty">대기중</div>
+        <div class="pnha-made"></div>
+        <div class="pnha-board"></div>
+        <div class="pnha-turn">대기중</div>
         <div class="pnha-call"></div>
-        <button class="pnha-fold" type="button">✋ Fold 하기</button>
+        <button class="pnha-fold" type="button">Fold</button>
         <div class="pnha-foldmsg"></div>
       </div>`;
     doc.body.appendChild(box);
 
     const q = (s) => box.querySelector(s);
     const els = {
-      box, cards: q('.pnha-cards'), code: q('.pnha-code'), tag: q('.pnha-tag'),
+      box, cards: q('.pnha-cards'), made: q('.pnha-made'), board: q('.pnha-board'),
       turn: q('.pnha-turn'), call: q('.pnha-call'), fold: q('.pnha-fold'),
       foldmsg: q('.pnha-foldmsg'), min: q('.pnha-min'), pop: q('.pnha-pop'), head: q('.pnha-head')
     };
 
     els.fold.addEventListener('click', () => {
+      const myTurn = !!lastState.myTurn;
+      const wasArmed = !!lastState.foldArmed;
       const ok = clickFoldButton();
-      els.foldmsg.textContent = ok ? '✓ 폴드함' : '폴드 버튼 없음(내 차례?)';
-      setTimeout(() => { els.foldmsg.textContent = ''; }, 1600);
+      if (!ok) { flash(els, '폴드 버튼 없음 (내 차례 아님)'); return; }
+      if (myTurn) {
+        flash(els, '✓ 폴드');             // 내 차례 → 즉시 폴드
+      } else {
+        preFoldArmed = !wasArmed;         // 내 차례 전 → 예약 ↔ 취소 토글
+        flash(els, preFoldArmed ? '✓ 폴드 예약함' : '✓ 예약 취소');
+      }
+      detectMyHand();                     // 버튼 라벨 즉시 갱신
     });
     if (els.min) els.min.addEventListener('click', () => {
       box.classList.toggle('collapsed');
@@ -420,37 +566,71 @@
   const colorCard = (p) =>
     '<span class="' + ((p.includes('♥') || p.includes('♦')) ? 'pnha-red' : '') + '">' + p + '</span>';
 
+  function flash(els, text) {
+    els.foldmsg.textContent = text;
+    setTimeout(() => { els.foldmsg.textContent = ''; }, 1600);
+  }
+
   function renderOverlay(state) {
     lastState = state;
     ensureOverlay();
     if (!overlayEls) return;
-    const { box, cards, code, tag, turn, call } = overlayEls;
+    const { box, cards, made, board, turn, call } = overlayEls;
 
     if (!state.hasCards) {
       cards.className = 'pnha-cards empty';
-      cards.textContent = state.folded ? '🃏 폴드함' : '패 대기중…';
-      code.textContent = state.folded ? '다음 패 대기' : '';
-      tag.textContent = '-';
+      cards.textContent = state.folded ? '폴드' : '대기중';
+      made.textContent = ''; made.className = 'pnha-made';
+      board.textContent = ''; board.style.display = 'none';
       box.classList.remove('premium');
     } else {
       cards.className = 'pnha-cards';
       cards.innerHTML = colorCard(state.pretty1) + ' ' + colorCard(state.pretty2);
-      code.textContent = state.hand;
-      tag.textContent = state.allowed ? '★ 프리미엄' : '일반';
       box.classList.toggle('premium', !!state.allowed);
+
+      // 족보 줄: 플롭 이후엔 완성 족보, 프리플롭엔 핸드코드(AKo 등)
+      if (state.made) {
+        made.className = 'pnha-made ' + state.made.klass;
+        made.textContent = state.made.name + (state.made.usesHole ? '' : ' (보드)');
+      } else {
+        made.className = 'pnha-made pnha-code';
+        made.textContent = state.hand;
+      }
+
+      // 보드 카드
+      if (state.boardPretty && state.boardPretty.length) {
+        board.style.display = 'block';
+        board.innerHTML = state.boardPretty.map(colorCard).join(' ');
+      } else {
+        board.style.display = 'none';
+      }
     }
 
     box.classList.toggle('my-turn', !!state.myTurn);
-    turn.textContent = state.myTurn ? '🔔 내 차례!' : '대기 중';
+    turn.textContent = state.myTurn ? '진행중' : '대기중';
 
     const a = state.action;
     if (state.myTurn && a && a.canCheck && !a.callAmount) {
-      call.innerHTML = '<span class="chk">✓ 체크 가능 (콜 0)</span>';
+      call.innerHTML = '<span class="chk">체크 가능</span>';
     } else if (state.myTurn && a && a.callAmount != null) {
       const bb = a.callBB != null ? ' · <span class="bb">' + fmtBB(a.callBB) + ' BB</span>' : '';
       call.innerHTML = '콜 ' + a.callAmount + bb;
     } else {
       call.textContent = '';
+    }
+
+    // Fold 버튼: 내 차례=즉시(빨강) / 미리폴드 예약=회색
+    const fold = overlayEls.fold;
+    fold.style.display = (state.hasCards || state.myTurn) ? 'block' : 'none';
+    if (state.myTurn) {
+      fold.textContent = 'Fold';
+      fold.classList.remove('armed');
+    } else if (state.foldArmed) {
+      fold.textContent = '폴드 예약됨';
+      fold.classList.add('armed');
+    } else {
+      fold.textContent = '미리 폴드';
+      fold.classList.remove('armed');
     }
   }
 

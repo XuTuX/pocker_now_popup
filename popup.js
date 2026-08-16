@@ -62,18 +62,19 @@ function render() {
 function renderCurrentHand(current) {
   if (!current) {
     el('currentPretty').textContent = '-';
-    el('currentHand').textContent = '-';
-    el('turnBadge').textContent = '대기 중';
+    el('currentHand').textContent = '';
+    el('turnBadge').textContent = '대기중';
     el('handBar').classList.remove('my-turn');
     return;
   }
   el('currentPretty').textContent = current.pretty || '-';
-  el('currentHand').textContent = current.hand || '-';
+  // 플롭 이후엔 완성된 족보를, 프리플롭엔 빈칸 (지저분한 핸드코드 제거)
+  el('currentHand').textContent = current.made || '';
   el('currentHand').classList.toggle('allowed', !!current.allowed);
 
   const myTurn = !!current.myTurn;
   el('handBar').classList.toggle('my-turn', myTurn);
-  el('turnBadge').textContent = myTurn ? '🔔 내 차례' : '대기 중';
+  el('turnBadge').textContent = myTurn ? '진행중' : '대기중';
 }
 
 // 팝업이 열려있는 동안 실시간 갱신 (content.js 가 storage 를 업데이트하면 반영)
