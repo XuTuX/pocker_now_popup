@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>PokerNow Hand Alert</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header class="header">
+    <h1>PokerNow Hand Alert</h1>
+  </header>
+
+  <!-- 전체 ON/OFF -->
+  <section class="row status-row">
+    <span class="label">Status</span>
+    <label class="switch">
+      <input type="checkbox" id="enabled" />
+      <span class="slider"></span>
+    </label>
+    <span id="statusText" class="status-text">ON</span>
+  </section>
+
+  <!-- 현재 핸드: 위에 한 줄로 간단히 표시. 내 차례면 강조. -->
+  <section id="handBar" class="hand-bar">
+    <span id="turnBadge" class="turn-badge">대기 중</span>
+    <span id="currentPretty" class="pretty">-</span>
+    <span id="currentHand" class="hand-code">-</span>
+  </section>
+
+  <!-- 수동 Fold: 다른 탭에 있어도 여기서 폴드 -->
+  <section class="fold-section">
+    <button id="foldBtn" class="fold-btn">✋ Fold 하기</button>
+    <div id="foldMsg" class="fold-msg">버튼 · <b>F</b> 키 · 또는 알림의 Fold 버튼 (자동 아님)</div>
+  </section>
+
+  <!-- 프리미엄 핸드 체크박스 -->
+  <section>
+    <div class="section-title">Premium Hands</div>
+    <div id="handList" class="hand-list"><!-- JS 로 채움 --></div>
+  </section>
+
+  <!-- 소리 / 알림 토글 -->
+  <section class="row">
+    <span class="label">Sound</span>
+    <label class="switch small">
+      <input type="checkbox" id="soundEnabled" />
+      <span class="slider"></span>
+    </label>
+  </section>
+  <section class="row">
+    <span class="label">Desktop Notification</span>
+    <label class="switch small">
+      <input type="checkbox" id="notificationEnabled" />
+      <span class="slider"></span>
+    </label>
+  </section>
+
+  <div class="actions">
+    <button id="saveBtn" class="save-btn">Save</button>
+    <a href="#" id="openOptions" class="options-link">More settings (13×13 matrix) →</a>
+  </div>
+
+  <div id="savedMsg" class="saved-msg"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

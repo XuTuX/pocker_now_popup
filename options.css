@@ -1,0 +1,102 @@
+/* PokerNow Hand Alert - options.css
+ * 옵션 페이지(13×13 스타팅 핸드 매트릭스) 스타일. */
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 24px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: #16171d;
+  color: #e8e8ee;
+}
+
+.wrap { max-width: 760px; margin: 0 auto; }
+
+h1 { font-size: 20px; color: #7ee787; margin: 0 0 6px; }
+.hint { color: #9aa0b4; font-size: 13px; line-height: 1.5; margin: 0 0 16px; }
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.toolbar button {
+  padding: 6px 12px;
+  border: 1px solid #3a3d4d;
+  background: #23252f;
+  color: #e8e8ee;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.toolbar button:hover { background: #2d303c; }
+.count { color: #9aa0b4; font-size: 13px; margin-left: auto; }
+
+.matrix-scroll { overflow-x: auto; }
+
+.matrix {
+  border-collapse: collapse;
+  margin: 0 auto;
+}
+.matrix th, .matrix td {
+  width: 46px;
+  height: 40px;
+  text-align: center;
+  border: 1px solid #23252f;
+  font-size: 12px;
+  font-weight: 600;
+}
+.matrix th { color: #9aa0b4; background: transparent; }
+
+.matrix td {
+  cursor: pointer;
+  user-select: none;
+  color: #cfd2e0;
+  transition: transform 0.05s;
+}
+.matrix td.pair    { background: #2b3550; }
+.matrix td.suited  { background: #223b2c; }
+.matrix td.offsuit { background: #3a2a2a; }
+
+.matrix td.selected {
+  background: #2ea043 !important;
+  color: #fff;
+  box-shadow: inset 0 0 0 2px #7ee787;
+}
+.matrix td:hover { filter: brightness(1.25); }
+
+.legend {
+  display: flex;
+  gap: 14px;
+  margin: 16px 0;
+  font-size: 12px;
+  color: #9aa0b4;
+  flex-wrap: wrap;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 12px;
+}
+.chip.pair { background: #2b3550; color: #cfd2e0; }
+.chip.suited { background: #223b2c; color: #cfd2e0; }
+.chip.offsuit { background: #3a2a2a; color: #cfd2e0; }
+.chip.selected { background: #2ea043; color: #fff; }
+
+.save-row { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
+.save-btn {
+  padding: 10px 24px;
+  border: none;
+  border-radius: 8px;
+  background: #2ea043;
+  color: #fff;
+  font-weight: 700;
+  font-size: 14px;
+  cursor: pointer;
+}
+.save-btn:hover { background: #3fb950; }
+.saved-msg { color: #7ee787; font-size: 13px; }

@@ -1,0 +1,186 @@
+/* PokerNow Hand Alert - popup.css
+ * 팝업 창(아이콘 클릭 시)의 스타일. 다크 톤의 컴팩트한 UI. */
+
+* { box-sizing: border-box; }
+
+body {
+  width: 280px;
+  margin: 0;
+  padding: 14px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: #1e1f26;
+  color: #e8e8ee;
+  font-size: 13px;
+}
+
+.header h1 {
+  font-size: 15px;
+  margin: 0 0 10px;
+  color: #7ee787;
+  letter-spacing: 0.3px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.label { flex: 1; }
+
+.status-row .status-text {
+  font-weight: 700;
+  color: #7ee787;
+}
+
+.section-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: #9aa0b4;
+  margin: 14px 0 6px;
+}
+
+/* 현재 핸드: 위쪽 한 줄 컴팩트 바 */
+.hand-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #282a36;
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-top: 10px;
+}
+.hand-bar .turn-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 10px;
+  background: #3a3d4d;
+  color: #9aa0b4;
+  white-space: nowrap;
+}
+/* 내 차례일 때 강조 */
+.hand-bar.my-turn { box-shadow: inset 0 0 0 2px #f0a531; background: #34302a; }
+.hand-bar.my-turn .turn-badge { background: #f0a531; color: #1e1f26; }
+.hand-bar .pretty {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  margin-left: auto;
+}
+.hand-bar .hand-code {
+  font-size: 12px;
+  color: #9aa0b4;
+  min-width: 34px;
+  text-align: right;
+}
+.hand-bar .hand-code.allowed { color: #7ee787; font-weight: 700; }
+
+/* 핸드 체크박스 목록 */
+.hand-list {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 10px;
+  max-height: 160px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.hand-list label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  padding: 2px 0;
+}
+.hand-list input { cursor: pointer; }
+
+/* 수동 Fold 버튼 */
+.fold-section { margin-top: 10px; }
+.fold-btn {
+  width: 100%;
+  padding: 10px;
+  border: none;
+  border-radius: 8px;
+  background: #b3242f;
+  color: #fff;
+  font-weight: 700;
+  font-size: 14px;
+  cursor: pointer;
+}
+.fold-btn:hover { background: #d0303c; }
+.fold-btn:disabled { background: #4a4d5e; cursor: not-allowed; }
+.fold-msg {
+  text-align: center;
+  font-size: 11px;
+  color: #9aa0b4;
+  margin-top: 4px;
+  min-height: 14px;
+}
+.fold-msg.ok { color: #7ee787; }
+.fold-msg.err { color: #f85149; }
+
+/* 토글 스위치 */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 22px;
+}
+.switch.small { width: 34px; height: 18px; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider {
+  position: absolute;
+  cursor: pointer;
+  inset: 0;
+  background: #4a4d5e;
+  border-radius: 22px;
+  transition: 0.2s;
+}
+.slider::before {
+  content: "";
+  position: absolute;
+  height: 16px; width: 16px;
+  left: 3px; bottom: 3px;
+  background: #fff;
+  border-radius: 50%;
+  transition: 0.2s;
+}
+.switch.small .slider::before { height: 12px; width: 12px; }
+input:checked + .slider { background: #2ea043; }
+input:checked + .slider::before { transform: translateX(18px); }
+.switch.small input:checked + .slider::before { transform: translateX(16px); }
+
+/* 버튼 */
+.actions { margin-top: 14px; }
+.save-btn {
+  width: 100%;
+  padding: 9px;
+  border: none;
+  border-radius: 8px;
+  background: #2ea043;
+  color: #fff;
+  font-weight: 700;
+  font-size: 14px;
+  cursor: pointer;
+}
+.save-btn:hover { background: #3fb950; }
+
+.options-link {
+  display: block;
+  margin-top: 8px;
+  text-align: center;
+  color: #58a6ff;
+  text-decoration: none;
+  font-size: 12px;
+}
+.options-link:hover { text-decoration: underline; }
+
+.saved-msg {
+  text-align: center;
+  color: #7ee787;
+  font-size: 12px;
+  height: 16px;
+  margin-top: 6px;
+}

@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>PokerNow Hand Alert - Options</title>
+  <link rel="stylesheet" href="options.css" />
+</head>
+<body>
+  <div class="wrap">
+    <h1>PokerNow Hand Alert — 상세 설정</h1>
+    <p class="hint">
+      아래 13×13 표에서 알림을 받을 스타팅 핸드를 클릭해 선택/해제하세요.<br />
+      대각선 = 페어(AA, KK…), 대각선 위 = 수딧(s), 대각선 아래 = 오프수딧(o).
+    </p>
+
+    <div class="toolbar">
+      <button id="selectPremium">프리미엄 기본값</button>
+      <button id="selectAll">전체 선택</button>
+      <button id="clearAll">전체 해제</button>
+      <span id="count" class="count"></span>
+    </div>
+
+    <div class="matrix-scroll">
+      <table id="matrix" class="matrix"><!-- JS 로 채움 --></table>
+    </div>
+
+    <div class="legend">
+      <span class="chip pair">페어</span>
+      <span class="chip suited">수딧 (s)</span>
+      <span class="chip offsuit">오프수딧 (o)</span>
+      <span class="chip selected">선택됨</span>
+    </div>
+
+    <div class="save-row">
+      <button id="saveBtn" class="save-btn">저장</button>
+      <span id="savedMsg" class="saved-msg"></span>
+    </div>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>
