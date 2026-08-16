@@ -458,15 +458,19 @@
     #${OVERLAY_ID}.premium{border-color:#2ea043;box-shadow:0 0 0 2px #2ea043,0 8px 28px rgba(0,0,0,.5);}
     #${OVERLAY_ID} .pnha-turn{margin-top:8px;font-size:12px;font-weight:700;color:#9aa0b4;}
     #${OVERLAY_ID}.my-turn .pnha-turn{color:#1e1f26;background:#f0a531;border-radius:8px;padding:3px;}
-    #${OVERLAY_ID} .pnha-call{margin-top:7px;font-size:13px;font-weight:800;color:#e8e8ee;display:none;}
-    #${OVERLAY_ID}.my-turn .pnha-call{display:block;}
-    #${OVERLAY_ID} .pnha-call .bb{color:#7ee787;}
-    #${OVERLAY_ID} .pnha-call .chk{color:#58a6ff;}
-    #${OVERLAY_ID} .pnha-fold{margin-top:8px;width:100%;padding:9px;border:none;border-radius:8px;
-      background:#b3242f;color:#fff;font-weight:800;font-size:14px;cursor:pointer;}
+    #${OVERLAY_ID} .pnha-actions{margin-top:8px;display:flex;gap:8px;}
+    #${OVERLAY_ID} .pnha-fold,#${OVERLAY_ID} .pnha-call{flex:1;padding:9px 6px;border:none;border-radius:8px;
+      color:#fff;font-weight:800;font-size:14px;line-height:1.15;cursor:pointer;}
+    #${OVERLAY_ID} .pnha-fold{background:#b3242f;}
     #${OVERLAY_ID} .pnha-fold:hover{background:#d0303c;}
     #${OVERLAY_ID} .pnha-fold.armed{background:#3a3d4d;color:#cfd2e0;box-shadow:none;}
     #${OVERLAY_ID} .pnha-fold.armed:hover{background:#474a5c;}
+    #${OVERLAY_ID} .pnha-call{background:#2ea043;display:none;}
+    #${OVERLAY_ID} .pnha-call:hover{background:#3fb854;}
+    #${OVERLAY_ID} .pnha-call.check{background:#1f6feb;}
+    #${OVERLAY_ID} .pnha-call.check:hover{background:#388bfd;}
+    #${OVERLAY_ID} .pnha-call .bb{display:block;font-size:11px;font-weight:700;opacity:.85;margin-top:1px;}
+    #${OVERLAY_ID}.my-turn .pnha-call{display:block;}
     #${OVERLAY_ID}.collapsed .pnha-body{display:none;}
     #${OVERLAY_ID} .pnha-foldmsg{font-size:10px;color:#9aa0b4;margin-top:5px;height:12px;}
   `;
@@ -493,8 +497,10 @@
         <div class="pnha-made"></div>
         <div class="pnha-board"></div>
         <div class="pnha-turn">대기중</div>
-        <div class="pnha-call"></div>
-        <button class="pnha-fold" type="button">Fold</button>
+        <div class="pnha-actions">
+          <button class="pnha-fold" type="button">Fold</button>
+          <button class="pnha-call" type="button">Call</button>
+        </div>
         <div class="pnha-foldmsg"></div>
       </div>`;
     doc.body.appendChild(box);
@@ -505,6 +511,15 @@
       turn: q('.pnha-turn'), call: q('.pnha-call'), fold: q('.pnha-fold'),
       foldmsg: q('.pnha-foldmsg'), min: q('.pnha-min'), pop: q('.pnha-pop'), head: q('.pnha-head')
     };
+
+    els.call.addEventListener('click', () => {
+      if (!lastState.myTurn) { flash(els, '내 차례 아님'); return; }
+      const a = lastState.action;
+      const wantsCheck = !!(a && a.canCheck && a.callAmount == null);
+      const ok = wantsCheck ? clickCheckButton() : clickCallButton();
+      flash(els, ok ? (wantsCheck ? '✓ 체크' : '✓ 콜') : '버튼 없음');
+      detectMyHand();
+    });
 
     els.fold.addEventListener('click', () => {
       const myTurn = !!lastState.myTurn;
@@ -579,8 +594,8 @@
 
     if (!state.hasCards) {
       cards.className = 'pnha-cards empty';
-      cards.textContent = state.folded ? '폴드' : '대기중';
-      made.textContent = ''; made.className = 'pnha-made';
+      cards.textContent = state.folded ? '-' : '대기중';
+      made.textContent = ''; made.className = 'pnha-made'; made.style.display = 'none';
       board.textContent = ''; board.style.display = 'none';
       box.classList.remove('premium');
     } else {
@@ -588,13 +603,15 @@
       cards.innerHTML = colorCard(state.pretty1) + ' ' + colorCard(state.pretty2);
       box.classList.toggle('premium', !!state.allowed);
 
-      // 족보 줄: 플롭 이후엔 완성 족보, 프리플롭엔 핸드코드(AKo 등)
+      // 족보 줄: 플롭 이후에만 완성 족보 표시 (프리플롭 핸드코드는 카드로 충분해서 숨김)
       if (state.made) {
+        made.style.display = 'block';
         made.className = 'pnha-made ' + state.made.klass;
         made.textContent = state.made.name + (state.made.usesHole ? '' : ' (보드)');
       } else {
-        made.className = 'pnha-made pnha-code';
-        made.textContent = state.hand;
+        made.style.display = 'none';
+        made.className = 'pnha-made';
+        made.textContent = '';
       }
 
       // 보드 카드
@@ -609,14 +626,18 @@
     box.classList.toggle('my-turn', !!state.myTurn);
     turn.textContent = state.myTurn ? '진행중' : '대기중';
 
+    // 콜 버튼: 체크 가능하면 "체크", 콜해야 하면 "콜 {칩}" + "몇 BB 더 내는지" 부제
     const a = state.action;
-    if (state.myTurn && a && a.canCheck && !a.callAmount) {
-      call.innerHTML = '<span class="chk">체크 가능</span>';
+    if (state.myTurn && a && a.canCheck && a.callAmount == null) {
+      call.classList.add('check');
+      call.innerHTML = '체크';
     } else if (state.myTurn && a && a.callAmount != null) {
-      const bb = a.callBB != null ? ' · <span class="bb">' + fmtBB(a.callBB) + ' BB</span>' : '';
+      call.classList.remove('check');
+      const bb = a.callBB != null ? '<span class="bb">+' + fmtBB(a.callBB) + ' BB</span>' : '';
       call.innerHTML = '콜 ' + a.callAmount + bb;
     } else {
-      call.textContent = '';
+      call.classList.remove('check');
+      call.innerHTML = '콜';
     }
 
     // Fold 버튼: 내 차례=즉시(빨강) / 미리폴드 예약=회색
@@ -695,6 +716,25 @@
     log('Fold 버튼을 찾지 못함 (내 차례가 아니거나 셀렉터 확인 필요)');
     return false;
   }
+
+  // 콜 / 체크 버튼 클릭 (사용자가 콜 버튼을 눌렀을 때만 호출됨)
+  function clickActionByText(selectors, exactWords) {
+    for (const sel of selectors) {
+      let btn = null;
+      try { btn = document.querySelector(sel); } catch (e) {}
+      if (btn && isClickable(btn)) { btn.click(); return true; }
+    }
+    const candidates = Array.from(document.querySelectorAll('button, [role="button"], .action-button'));
+    for (const el of candidates) {
+      const t = (el.textContent || '').trim().toLowerCase();
+      if (exactWords.some((w) => t === w || t.startsWith(w + ' ')) && isClickable(el)) { el.click(); return true; }
+    }
+    return false;
+  }
+  const clickCallButton = () =>
+    clickActionByText(['.action-buttons .call', '.action-button.call'], ['call', '콜']);
+  const clickCheckButton = () =>
+    clickActionByText(['.action-buttons .check', '.action-button.check'], ['check', '체크']);
 
   function isClickable(el) {
     if (!el || el.disabled) return false;
