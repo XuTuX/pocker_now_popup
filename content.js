@@ -3,8 +3,9 @@
  * -------------------------------------------------------------------------
  * PokerNow 게임 페이지에서 실행되어:
  *   1) 내 홀카드 2장을 감지하고 "AA", "AKs" 처럼 정규화한다.
- *   2) 화면 위 오버레이(HUD)에 현재 패 / 프리미엄 여부 / 내 차례 / 콜 정보를
- *      항상 표시한다. (⧉ 버튼으로 다른 창 위에 뜨는 PiP 창으로 뺄 수 있음)
+ *   2) 화면 위 오버레이(HUD)에 현재 패 / 프리미엄 여부 / 내 차례 남은시간 /
+ *      내 스택·낸 돈·더 낼 돈(전부 BB 단위)을 항상 표시한다.
+ *      (⧉ 버튼으로 다른 창 위에 뜨는 PiP 창으로 뺄 수 있음)
  *   3) 프리미엄 핸드면 알림음을 낸다.
  *
  * ⚠️ 게임 버튼을 "자동으로" 누르는 기능은 없다. 폴드는 사용자가 오버레이
@@ -33,8 +34,27 @@
   // Fold 버튼 후보
   const FOLD_BUTTON_SELECTORS = ['.action-buttons .fold', '.action-button.fold', '.game-decisions-ctn .fold'];
 
-  // 블라인드 표시(콜 → BB 환산용)
+  // 블라인드 표시(칩 → BB 환산용)
   const BLIND_SELECTORS = ['.blind-value', '.blind-value-ctn'];
+
+  // 실제 PokerNow DOM (game.bundle 확인):
+  //   자리   : <div class="table-player table-player-N [you-player] [decision-current] [fold]">
+  //   스택   : <p class="table-player-stack"><span class="chips-value"><span class="normal-value">14114
+  //   베팅   : <p class="table-player-bet-value"><span class="chips-value"><span class="normal-value">600
+  //            (currentBet 이 있을 때만 렌더. 체크면 class 에 check 가 붙고 텍스트는 "check")
+  //   타이머 : <div class="time-to-talk"><div class="time-bank" style="width:N%"><div class="normal-time" style="width:N%">
+  //   ★ chips-value 는 BB 표시 모드일 때 .bb-value(BB) 와 .normal-value(원래 칩) 를 둘 다 갖는다.
+  //     그래서 칩은 항상 .normal-value 에서만 읽어야 한다.
+  const STACK_SELECTOR = '.table-player-stack';
+  const BET_SELECTOR = '.table-player-bet-value';
+  const TIMER_SELECTOR = '.time-to-talk';
+
+  // 액션 버튼이 들어있는 컨테이너
+  const ACTION_ROOT_SELECTORS = ['.action-buttons', '.game-decisions-ctn'];
+
+  // 액션 버튼 텍스트 (클래스로 못 찾을 때 폴백)
+  const ACTION_WORDS = { call: ['call', '콜'], check: ['check', '체크'] };
+
 
   // 커뮤니티 카드(보드: 플롭/턴/리버) 컨테이너 후보
   const BOARD_SELECTORS = ['.table-cards', '.community-cards', '.board-cards', '.table-cards-ctn', '.community', '.board'];
@@ -53,6 +73,22 @@
   let lastRawKey = null;     // 마지막 감지 카드 키 (새 핸드 판별)
   let preFoldArmed = false;  // 내가 "미리 폴드"를 예약했는지 (취소 가능)
   let audioCtx = null;
+
+  // 자리 번호가 도는 방향(+1/−1). 한 번 알아내면 그 테이블 내내 같다.
+  //   src: 'blinds'(확실) > 'geometry'(자리 좌표로 추정). 블라인드를 보면 덮어쓴다.
+  let seatDir = null, seatDirSrc = null;
+  // 이번 핸드에 내가 블라인드였는지 ('SB' | 'BB' | null) — 방향을 몰라도 이건 확실하다
+  let heroBlindRole = null;
+  // 이번 핸드에 카드를 받은 자리 번호들 (폴드해서 카드가 사라져도 유지)
+  let handSeats = new Set();
+
+  // 이번 핸드에 낸 돈 = (핸드 시작 전 스택) − (지금 스택)
+  let idleStack = null;      // 핸드와 핸드 사이(내 카드가 없을 때) 스택
+  let handStartStack = null; // 이번 핸드가 시작될 때의 스택
+  // 내 차례 제한시간 바.
+  //  t0 = 차례 시작 시각 / r = 마지막으로 본 남은 비율
+  //  aT,aR = "바가 처음 줄어든 순간"의 시각·비율 (여기부터 평균 속도를 잰다)
+  let turnTimer = { active: false, t0: 0, r: 1, aT: 0, aR: 0 };
 
   function defaultSettings() {
     return { enabled: true, soundEnabled: true, hands: ['AA', 'KK', 'QQ', 'JJ', 'AKs', 'AKo'] };
@@ -332,31 +368,256 @@
     return m ? parseFloat(m[0]) : null;
   };
 
-  // 빅블라인드 = 블라인드 표기 중 가장 큰 숫자
-  function getBigBlind() {
+  // 블라인드 표기에서 숫자들을 읽는다 → { sb: 가장 작은 값, bb: 가장 큰 값 }
+  function getBlinds() {
     for (const sel of BLIND_SELECTORS) {
       const ctn = document.querySelector(sel);
       if (!ctn) continue;
-      const nums = Array.from(ctn.querySelectorAll('.normal-value, .chips-value'))
+      const nums = Array.from(ctn.querySelectorAll('.normal-value'))
         .map((el) => firstNumber(el.textContent)).filter((n) => n > 0);
-      if (nums.length) return Math.max.apply(null, nums);
+      if (nums.length) return { sb: Math.min.apply(null, nums), bb: Math.max.apply(null, nums) };
       const n = firstNumber(ctn.textContent);
-      if (n) return n;
+      if (n) return { sb: n, bb: n };
+    }
+    return { sb: null, bb: null };
+  }
+  const getBigBlind = () => getBlinds().bb;
+
+  // 칩 금액 읽기: 항상 .normal-value(원래 칩) 에서만. BB 표시 모드에 속지 않는다.
+  function chipsIn(el) {
+    if (!el) return null;
+    const nv = el.querySelector('.normal-value');
+    if (nv) return firstNumber(nv.textContent);
+    // 올인이면 숫자 대신 "All In" 이 찍힌다
+    if (/all\s*in/i.test(el.textContent || '')) return 0;
+    return firstNumber(el.textContent);
+  }
+
+  const heroSeat = () => {
+    for (const sel of HERO_CONTAINER_SELECTORS) {
+      const el = document.querySelector(sel);
+      if (el) return el;
+    }
+    return null;
+  };
+
+  // 화면에 보이는 내 스택. PokerNow 는 (스택 − 이번 스트리트 베팅) 을 표시한다.
+  const readHeroStack = () => chipsIn((heroSeat() || document).querySelector(STACK_SELECTOR));
+
+  // 이번 스트리트의 내 베팅 / 테이블 최고 베팅 (원래 칩 단위)
+  function readBets() {
+    const hero = heroSeat();
+    let mine = 0, top = 0;
+    for (const seat of document.querySelectorAll('.table-player')) {
+      const betEl = seat.querySelector(BET_SELECTOR);
+      const v = (betEl && isClickable(betEl)) ? chipsIn(betEl) : null; // 안 보이는 베팅은 없는 것
+
+      if (v == null) continue;              // 베팅 없음 또는 "check"
+      if (v > top) top = v;
+      if (hero && seat === hero) mine = v;
+    }
+    return { mine, top };
+  }
+
+  // 콜/체크 버튼 찾기: 클래스 토큰 → 버튼 텍스트 순. (스킨·언어가 달라도 잡히도록)
+  function findActionButton(kind) {
+    const roots = ACTION_ROOT_SELECTORS.map((sel) => document.querySelector(sel)).filter(Boolean);
+    roots.push(document);
+    const clsRe = new RegExp('\\b' + kind + '\\b');
+    for (const root of roots) {
+      const btns = Array.from(root.querySelectorAll('button, .action-button, [role="button"]'));
+      for (const el of btns) {
+        if (clsRe.test((el.className || '').toString().toLowerCase()) && isClickable(el)) return el;
+      }
+      for (const el of btns) {
+        const t = (el.textContent || '').trim().toLowerCase();
+        if (ACTION_WORDS[kind].some((w) => t === w || t.startsWith(w + ' ')) && isClickable(el)) return el;
+      }
     }
     return null;
   }
 
-  // 내 차례 액션 정보: { canCheck, callAmount, callBB }
-  function getActionInfo() {
+  /* ===== 자리 순서 · 포지션 ============================================== */
+
+  const seatPosOf = (el) => {
+    const m = /\btable-player-(\d+)\b/.exec((el && el.className) || '');
+    return m ? parseInt(m[1], 10) : null;
+  };
+
+  // 딜러 버튼이 붙은 자리 번호 (.dealer-button-ctn.dealer-position-N)
+  // ※ 라이브 스트래들 버튼도 같은 클래스를 쓰므로 그건 제외한다.
+  function dealerSeatPos() {
+    for (const el of document.querySelectorAll('.dealer-button-ctn')) {
+      const cls = (el.className || '').toString();
+      if (/\blive-straddle\b/.test(cls)) continue;
+      const m = /\bdealer-position-(\d+)\b/.exec(cls);
+      if (m) return parseInt(m[1], 10);
+    }
+    return null;
+  }
+
+  // 자리 번호 → 그 자리의 이번 스트리트 베팅 (없으면 null)
+  function seatBetMap() {
+    const map = new Map();
+    for (const seat of document.querySelectorAll('.table-player')) {
+      const pos = seatPosOf(seat);
+      if (pos == null) continue;
+      const betEl = seat.querySelector(BET_SELECTOR);
+      map.set(pos, (betEl && isClickable(betEl)) ? chipsIn(betEl) : null);
+    }
+    return map;
+  }
+
+  // 이번 핸드에 카드를 받은 자리들을 번호순으로. (폴드로 카드가 사라져도 유지)
+  function updateHandSeats() {
+    for (const seat of document.querySelectorAll('.table-player')) {
+      const pos = seatPosOf(seat);
+      if (pos == null) continue;
+      if (seat.querySelector('.table-player-cards .card-container, .table-player-cards .card')) {
+        handSeats.add(pos);
+      }
+    }
+    return Array.from(handSeats).sort((a, b) => a - b);
+  }
+
+  // (1) 자리 좌표로 방향 추정: 자리 번호가 커지는 쪽이 화면상 시계방향이면 +1.
+  //     포커 액션은 시계방향으로 돌기 때문. 빈 자리까지 다 세므로 첫 핸드부터 바로 나온다.
+  function seatDirFromGeometry() {
+    const pts = [];
+    for (const seat of document.querySelectorAll('.table-player')) {
+      const pos = seatPosOf(seat);
+      if (pos == null) continue;
+      const r = seat.getBoundingClientRect();
+      if (!r.width && !r.height) continue;
+      pts.push({ pos, x: r.left + r.width / 2, y: r.top + r.height / 2 });
+    }
+    if (pts.length < 3) return null;
+    pts.sort((a, b) => a.pos - b.pos);
+    const cx = pts.reduce((t, p) => t + p.x, 0) / pts.length;
+    const cy = pts.reduce((t, p) => t + p.y, 0) / pts.length;
+    let sum = 0;
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i], b = pts[(i + 1) % pts.length];
+      let d = Math.atan2(b.y - cy, b.x - cx) - Math.atan2(a.y - cy, a.x - cx);
+      while (d > Math.PI) d -= 2 * Math.PI;
+      while (d < -Math.PI) d += 2 * Math.PI;
+      sum += d;
+    }
+    // 화면 좌표는 y 가 아래로 증가하므로 각도가 커지는 = 시계방향. 한 바퀴면 ±2π.
+    if (sum > 5) return 1;
+    if (sum < -5) return -1;
+    return null;
+  }
+
+  // (2) 블라인드로 확정: SB 바로 다음 자리가 BB 인 쪽이 진행 방향. (프리플랍에서만)
+  //     동시에 내가 SB/BB 였는지도 기록해 둔다 (방향을 몰라도 쓸 수 있는 정보).
+  function learnSeatDir(seats, boardLen) {
+    if (seatDirSrc !== 'blinds' && !seatDir) {
+      const g = seatDirFromGeometry();
+      if (g) { seatDir = g; seatDirSrc = 'geometry'; log('자리 방향(좌표 추정):', g); }
+    }
+    if (boardLen > 0 || seats.length < 2) return;   // 프리플랍에서만 블라인드를 믿는다
+
+    const { sb, bb } = getBlinds();
+    if (!sb || !bb || sb === bb) return;
+    const bets = seatBetMap();
+    let sbPos = null, bbPos = null;
+    for (const pos of seats) {
+      const v = bets.get(pos);
+      if (v === bb) bbPos = pos;
+      else if (v === sb) sbPos = pos;
+    }
+
+    const heroPos = seatPosOf(heroSeat());
+    if (heroPos != null && heroBlindRole == null) {
+      if (heroPos === bbPos) heroBlindRole = 'BB';
+      else if (heroPos === sbPos) heroBlindRole = 'SB';
+    }
+
+    if (seatDirSrc === 'blinds' || sbPos == null || bbPos == null) return;
+    const i = seats.indexOf(sbPos), n = seats.length;
+    if (seats[(i + 1) % n] === bbPos) { seatDir = 1; seatDirSrc = 'blinds'; }
+    else if (seats[(i - 1 + n) % n] === bbPos) { seatDir = -1; seatDirSrc = 'blinds'; }
+    if (seatDirSrc === 'blinds') log('자리 방향(블라인드로 확정):', seatDir);
+  }
+
+  const POS_LABEL = { 0: 'BTN', 1: 'SB', 2: 'BB' };
+
+  // 버튼 기준으로 내 포지션 이름 (BTN/SB/BB/UTG/HJ/CO …)
+  function heroPositionName(seats) {
+    const heroPos = seatPosOf(heroSeat());
+    const btn = dealerSeatPos();
+    const n = seats.length;
+    if (heroPos == null) return null;
+
+    // 방향을 몰라도 확실한 것부터: 버튼 자리인지 / 이번 핸드에 블라인드였는지
+    if (btn != null && heroPos === btn) return n === 2 ? 'BTN/SB' : 'BTN';
+    if (heroBlindRole) return heroBlindRole;
+
+    if (btn == null || !seatDir || n < 2) return null;
+    const b = seats.indexOf(btn), h = seats.indexOf(heroPos);
+    if (b < 0 || h < 0) return null;
+
+    // 버튼에서 진행 방향으로 몇 번째 자리인지 (0=BTN, 1=SB, 2=BB, …)
+    const idx = ((h - b) * seatDir % n + n) % n;
+    if (n === 2) return idx === 0 ? 'BTN/SB' : 'BB';   // 헤즈업은 버튼이 SB
+    if (idx <= 2) return POS_LABEL[idx];
+
+    // BB 다음부터가 UTG … CO
+    const j = idx - 3, k = n - 3;
+    if (k <= 2) return j === 0 ? 'UTG' : 'CO';
+    if (j === k - 1) return 'CO';
+    if (j === k - 2) return 'HJ';
+    return 'UTG' + (j ? '+' + j : '');
+  }
+
+  // 지금 누구 차례인지 (내 차례면 '나')
+  function turnPlayerName() {
+    const el = document.querySelector('.table-player.decision-current');
+    if (!el) return null;
+    if (/\byou-player\b/.test((el.className || '').toString())) return '나';
+    const name = el.querySelector('.table-player-name');
+    const t = name ? name.textContent.trim() : '';
+    return t || '상대';
+  }
+
+  // 내 차례 액션 정보.
+  // 콜 금액은 버튼 라벨을 읽지 않는다 — BB 표시 모드면 라벨이 BB 로 찍혀서 못 믿는다.
+  // 대신 (테이블 최고 베팅 − 내 베팅) 을 원래 칩 단위로 직접 계산한다.
+  function getActionInfo(stack) {
     const bb = getBigBlind();
-    const callBtn = document.querySelector('.action-buttons .call, .action-button.call');
-    const checkBtn = document.querySelector('.action-buttons .check, .action-button.check');
-    const callAmount = (callBtn && !callBtn.disabled) ? firstNumber(callBtn.textContent) : null;
+    const { mine, top } = readBets();
+    let toCall = Math.max(0, top - mine);
+    if (stack != null && toCall > stack) toCall = stack; // 스택보다 많이 콜할 수는 없다
     return {
-      canCheck: !!(checkBtn && !checkBtn.disabled),
-      callAmount,
-      callBB: (callAmount != null && bb) ? callAmount / bb : null
+      canCheck: !!findActionButton('check'),
+      canCall: !!findActionButton('call'),
+      toCallBB: bb ? toCall / bb : null
     };
+  }
+
+  // PokerNow 는 남은 초를 숫자로 안 보여준다. 대신 내 자리에 있는
+  // <div class="time-to-talk"> 안의 바 width(%) 가 곧 남은 비율이다. 그걸 그대로 읽는다.
+  // (normal-time = 기본 시간, time-bank = 타임뱅크. 둘을 합친 게 남은 전체)
+  function readTurnRemainRatio() {
+    const hero = heroSeat();
+    const ctn = hero && hero.querySelector(TIMER_SELECTOR);
+    if (!ctn) return null;
+    let pct = 0, found = false;
+    for (const bar of ctn.querySelectorAll('.normal-time, .time-bank')) {
+      const w = parseFloat(bar.style.width);
+      if (!isNaN(w)) { pct += w; found = true; }
+    }
+    return found ? Math.max(0, Math.min(100, pct)) / 100 : null;
+  }
+
+  // 내 차례 시작 시각을 잡아둔다. 남은 초는 바가 줄어드는 속도로 역산한다.
+  function syncTurnTimer(myTurn) {
+    if (!myTurn) { turnTimer.active = false; return; }
+    if (turnTimer.active) return;               // 이미 이번 차례를 재는 중
+    const now = Date.now();
+    const r0 = readTurnRemainRatio();
+    turnTimer = { active: true, t0: now, r: (r0 == null ? 1 : r0), aT: 0, aR: 0 };
   }
 
   const fmtBB = (x) => {
@@ -373,33 +634,50 @@
 
     ensureOverlay();
 
+    const bb = getBigBlind();
+    const toBB = (chips) => (chips != null && bb) ? chips / bb : null;
+    const stack = readHeroStack();
+    const stackBB = toBB(stack);
+
+    // 핸드가 끝난(=내 카드가 없는) 동안의 스택 = 다음 핸드의 "시작 스택"
+    const goIdle = () => { if (stack != null) idleStack = stack; handStartStack = null; };
+    const turnName = turnPlayerName();
+
     // 폴드했으면 카드 지움 (예약 상태도 초기화)
     if (isHeroFolded()) {
-      lastRawKey = null; preFoldArmed = false;
-      renderOverlay({ hasCards: false, folded: true, myTurn: false, foldArmed: false, action: null });
+      lastRawKey = null; preFoldArmed = false; goIdle(); syncTurnTimer(false);
+      renderOverlay({ hasCards: false, folded: true, myTurn: false, foldArmed: false, action: null,
+        stackBB, turnName, position: heroPositionName(updateHandSeats()) });
       return;
     }
 
     const myTurn = isMyTurn();
     if (myTurn) preFoldArmed = false; // 내 차례엔 즉시 폴드(예약 개념 없음)
-    const action = myTurn ? getActionInfo() : null;
+    syncTurnTimer(myTurn);
+    const action = myTurn ? getActionInfo(stack) : null;
     const els = findHoleCardElements();
 
     if (els.length !== 2) {
-      lastRawKey = null; preFoldArmed = false;
-      renderOverlay({ hasCards: false, myTurn, foldArmed: false, action });
+      lastRawKey = null; preFoldArmed = false; goIdle();
+      renderOverlay({ hasCards: false, myTurn, foldArmed: false, action, stackBB, turnName, position: null });
       return;
     }
 
     const c1 = parseCardElement(els[0]);
     const c2 = parseCardElement(els[1]);
     const hand = normalizeHand(c1, c2);
-    if (!hand) { renderOverlay({ hasCards: false, myTurn, foldArmed: false, action }); return; }
+    if (!hand) { renderOverlay({ hasCards: false, myTurn, foldArmed: false, action, stackBB, turnName }); return; }
 
     const allowed = settings.hands.includes(hand);
     const key = [prettyCard(c1), prettyCard(c2)].sort().join('|');
     const isNewHand = key !== lastRawKey;
-    if (isNewHand) preFoldArmed = false;
+    // 새 핸드 시작: 블라인드를 내기 전 스택(직전 대기중 스택)을 기준점으로 잡는다
+    if (isNewHand) {
+      preFoldArmed = false;
+      handStartStack = (idleStack != null) ? idleStack : stack;
+      handSeats = new Set();
+      heroBlindRole = null;
+    }
 
     const foldArmed = !myTurn && (preFoldArmed || isFoldArmedInDom());
 
@@ -409,9 +687,19 @@
     const made = board.length >= 3 ? describeMade(c1, c2, board) : null;
     const boardPretty = board.map(prettyCard);
 
+    // 이번 핸드 참가 자리 → 자리 도는 방향 학습 → 내 포지션
+    const seats = updateHandSeats();
+    learnSeatDir(seats, board.length);
+    const position = heroPositionName(seats);
+
+    // 이번 핸드에 이미 낸 돈 = 시작 스택 − 지금 스택 (블라인드·앤티까지 자동 포함)
+    const paidBB = (handStartStack != null && stack != null)
+      ? toBB(Math.max(0, handStartStack - stack)) : null;
+
     renderOverlay({
       hasCards: true, pretty1: prettyCard(c1), pretty2: prettyCard(c2),
-      hand, allowed, myTurn, foldArmed, action, made, boardPretty
+      hand, allowed, myTurn, foldArmed, action, made, boardPretty, stackBB, paidBB,
+      turnName, position
     });
 
     safe(() => chrome.storage.local.set({
@@ -435,7 +723,7 @@
   let lastState = { hasCards: false, myTurn: false };
 
   const PANEL_CSS = `
-    #${OVERLAY_ID}{position:fixed;top:80px;right:16px;z-index:2147483647;width:190px;
+    #${OVERLAY_ID}{position:fixed;top:80px;right:16px;z-index:2147483647;width:212px;
       font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
       background:#1e1f26;color:#e8e8ee;border-radius:12px;overflow:hidden;
       box-shadow:0 8px 28px rgba(0,0,0,.5);border:1px solid #33353f;user-select:none;}
@@ -456,21 +744,39 @@
     #${OVERLAY_ID} .pnha-made.made-weak{color:#9aa0b4;}
     #${OVERLAY_ID} .pnha-board{margin-top:4px;font-size:15px;font-weight:800;letter-spacing:1px;color:#e8e8ee;}
     #${OVERLAY_ID}.premium{border-color:#2ea043;box-shadow:0 0 0 2px #2ea043,0 8px 28px rgba(0,0,0,.5);}
-    #${OVERLAY_ID} .pnha-turn{margin-top:8px;font-size:12px;font-weight:700;color:#9aa0b4;}
-    #${OVERLAY_ID}.my-turn .pnha-turn{color:#1e1f26;background:#f0a531;border-radius:8px;padding:3px;}
-    #${OVERLAY_ID} .pnha-actions{margin-top:8px;display:flex;gap:8px;}
-    #${OVERLAY_ID} .pnha-fold,#${OVERLAY_ID} .pnha-call{flex:1;padding:9px 6px;border:none;border-radius:8px;
-      color:#fff;font-weight:800;font-size:14px;line-height:1.15;cursor:pointer;}
+    /* 메타 2칸: 내 포지션 / 지금 누구 차례 */
+    #${OVERLAY_ID} .pnha-meta{margin-top:8px;display:flex;gap:4px;}
+    #${OVERLAY_ID} .pnha-meta .pnha-stat b{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    #${OVERLAY_ID} .pnha-m-turn.mine b{color:#f0a531;}
+    /* 스탯 3칸: 내 스택 / 이번 핸드에 낸 돈 / 지금 더 내야 하는 돈 (전부 BB) */
+    #${OVERLAY_ID} .pnha-stats{margin-top:8px;display:flex;gap:4px;}
+    #${OVERLAY_ID} .pnha-stat{flex:1;background:#282a36;border-radius:7px;padding:4px 2px;line-height:1.15;}
+    #${OVERLAY_ID} .pnha-stat b{display:block;font-size:13px;font-weight:800;color:#e8e8ee;}
+    #${OVERLAY_ID} .pnha-stat i{display:block;font-size:9px;font-style:normal;font-weight:700;color:#9aa0b4;margin-top:1px;}
+    #${OVERLAY_ID} .pnha-stat.hot b{color:#f0a531;}
+    /* 내 차례 남은 시간 바 */
+    #${OVERLAY_ID} .pnha-turn{margin-top:8px;}
+    #${OVERLAY_ID} .pnha-bar{height:6px;border-radius:4px;background:#33353f;overflow:hidden;display:none;}
+    #${OVERLAY_ID}.my-turn .pnha-bar{display:block;}
+    #${OVERLAY_ID} .pnha-bar i{display:block;height:100%;width:100%;background:#7ee787;border-radius:4px;
+      transition:width .2s linear;}
+    #${OVERLAY_ID} .pnha-bar.warn i{background:#f0d24b;}
+    #${OVERLAY_ID} .pnha-bar.crit i{background:#ff5c72;}
+    #${OVERLAY_ID} .pnha-turntext{margin-top:3px;font-size:11px;font-weight:700;color:#9aa0b4;}
+    #${OVERLAY_ID}.my-turn .pnha-turntext{color:#f0a531;}
+    /* 액션 버튼: 콜 · 체크 · 폴드 (콜/체크는 가능할 때만 보임) */
+    #${OVERLAY_ID} .pnha-actions{margin-top:8px;display:flex;gap:6px;}
+    #${OVERLAY_ID} .pnha-actions button{flex:1;padding:8px 4px;border:none;border-radius:8px;
+      color:#fff;font-weight:800;font-size:13px;line-height:1.15;cursor:pointer;}
     #${OVERLAY_ID} .pnha-fold{background:#b3242f;}
     #${OVERLAY_ID} .pnha-fold:hover{background:#d0303c;}
     #${OVERLAY_ID} .pnha-fold.armed{background:#3a3d4d;color:#cfd2e0;box-shadow:none;}
     #${OVERLAY_ID} .pnha-fold.armed:hover{background:#474a5c;}
     #${OVERLAY_ID} .pnha-call{background:#2ea043;display:none;}
     #${OVERLAY_ID} .pnha-call:hover{background:#3fb854;}
-    #${OVERLAY_ID} .pnha-call.check{background:#1f6feb;}
-    #${OVERLAY_ID} .pnha-call.check:hover{background:#388bfd;}
+    #${OVERLAY_ID} .pnha-check{background:#1f6feb;display:none;}
+    #${OVERLAY_ID} .pnha-check:hover{background:#388bfd;}
     #${OVERLAY_ID} .pnha-call .bb{display:block;font-size:11px;font-weight:700;opacity:.85;margin-top:1px;}
-    #${OVERLAY_ID}.my-turn .pnha-call{display:block;}
     #${OVERLAY_ID}.collapsed .pnha-body{display:none;}
     #${OVERLAY_ID} .pnha-foldmsg{font-size:10px;color:#9aa0b4;margin-top:5px;height:12px;}
   `;
@@ -496,10 +802,23 @@
         <div class="pnha-cards empty">대기중</div>
         <div class="pnha-made"></div>
         <div class="pnha-board"></div>
-        <div class="pnha-turn">대기중</div>
+        <div class="pnha-meta">
+          <span class="pnha-stat pnha-m-pos"><b>—</b><i>내 포지션</i></span>
+          <span class="pnha-stat pnha-m-turn"><b>—</b><i>지금 차례</i></span>
+        </div>
+        <div class="pnha-stats">
+          <span class="pnha-stat pnha-s-stack"><b>—</b><i>내 스택</i></span>
+          <span class="pnha-stat pnha-s-paid"><b>—</b><i>낸 돈</i></span>
+          <span class="pnha-stat pnha-s-tocall"><b>—</b><i>더 낼 돈</i></span>
+        </div>
+        <div class="pnha-turn">
+          <div class="pnha-bar"><i></i></div>
+          <div class="pnha-turntext">대기중</div>
+        </div>
         <div class="pnha-actions">
-          <button class="pnha-fold" type="button">Fold</button>
-          <button class="pnha-call" type="button">Call</button>
+          <button class="pnha-call" type="button">콜</button>
+          <button class="pnha-check" type="button">체크</button>
+          <button class="pnha-fold" type="button">폴드</button>
         </div>
         <div class="pnha-foldmsg"></div>
       </div>`;
@@ -508,16 +827,23 @@
     const q = (s) => box.querySelector(s);
     const els = {
       box, cards: q('.pnha-cards'), made: q('.pnha-made'), board: q('.pnha-board'),
-      turn: q('.pnha-turn'), call: q('.pnha-call'), fold: q('.pnha-fold'),
+      call: q('.pnha-call'), check: q('.pnha-check'), fold: q('.pnha-fold'),
+      bar: q('.pnha-bar'), barFill: q('.pnha-bar i'), turntext: q('.pnha-turntext'),
+      mPos: q('.pnha-m-pos b'), mTurn: q('.pnha-m-turn b'), mTurnBox: q('.pnha-m-turn'),
+      sStack: q('.pnha-s-stack b'), sPaid: q('.pnha-s-paid b'),
+      sToCall: q('.pnha-s-tocall b'), sToCallBox: q('.pnha-s-tocall'),
       foldmsg: q('.pnha-foldmsg'), min: q('.pnha-min'), pop: q('.pnha-pop'), head: q('.pnha-head')
     };
 
     els.call.addEventListener('click', () => {
       if (!lastState.myTurn) { flash(els, '내 차례 아님'); return; }
-      const a = lastState.action;
-      const wantsCheck = !!(a && a.canCheck && a.callAmount == null);
-      const ok = wantsCheck ? clickCheckButton() : clickCallButton();
-      flash(els, ok ? (wantsCheck ? '✓ 체크' : '✓ 콜') : '버튼 없음');
+      flash(els, clickCallButton() ? '✓ 콜' : '콜 버튼 없음');
+      detectMyHand();
+    });
+
+    els.check.addEventListener('click', () => {
+      if (!lastState.myTurn) { flash(els, '내 차례 아님'); return; }
+      flash(els, clickCheckButton() ? '✓ 체크' : '체크 버튼 없음');
       detectMyHand();
     });
 
@@ -590,7 +916,7 @@
     lastState = state;
     ensureOverlay();
     if (!overlayEls) return;
-    const { box, cards, made, board, turn, call } = overlayEls;
+    const { box, cards, made, board, call, check } = overlayEls;
 
     if (!state.hasCards) {
       cards.className = 'pnha-cards empty';
@@ -624,36 +950,116 @@
     }
 
     box.classList.toggle('my-turn', !!state.myTurn);
-    turn.textContent = state.myTurn ? '진행중' : '대기중';
 
-    // 콜 버튼: 체크 가능하면 "체크", 콜해야 하면 "콜 {칩}" + "몇 BB 더 내는지" 부제
+    // 내 포지션 / 지금 누구 차례
+    overlayEls.mPos.textContent = state.position || '—';
+    overlayEls.mTurn.textContent = state.turnName || '—';
+    overlayEls.mTurnBox.classList.toggle('mine', state.turnName === '나');
+
+    // 스탯 3칸 (칩 금액은 안 쓰고 전부 BB 로 환산해서 보여준다)
     const a = state.action;
-    if (state.myTurn && a && a.canCheck && a.callAmount == null) {
-      call.classList.add('check');
-      call.innerHTML = '체크';
-    } else if (state.myTurn && a && a.callAmount != null) {
-      call.classList.remove('check');
-      const bb = a.callBB != null ? '<span class="bb">+' + fmtBB(a.callBB) + ' BB</span>' : '';
-      call.innerHTML = '콜 ' + a.callAmount + bb;
-    } else {
-      call.classList.remove('check');
-      call.innerHTML = '콜';
+    const bbText = (v) => (v == null ? '—' : fmtBB(v) + ' BB');
+    // 체크만 하면 되는 상황이면 더 낼 돈은 0 BB
+    const toCallBB = state.myTurn && a
+      ? (a.toCallBB != null ? a.toCallBB : (a.canCheck ? 0 : null))
+      : null;
+    overlayEls.sStack.textContent = bbText(state.stackBB);
+    overlayEls.sPaid.textContent = bbText(state.paidBB);
+    overlayEls.sToCall.textContent = state.myTurn ? bbText(toCallBB) : '—';
+    overlayEls.sToCallBox.classList.toggle('hot', !!toCallBB);
+
+    paintTimer();
+
+    // 콜 / 체크 버튼은 "더 낼 돈" 으로만 갈린다. 둘이 같이 뜨는 일은 없다.
+    //   더 낼 돈 0    → 체크만
+    //   더 낼 돈 > 0  → 콜만
+    // (PokerNow 는 낼 게 없을 때도 call 클래스 버튼을 "Bet" 라벨로 남겨둬서 클래스는 못 믿는다)
+    let showCall = false, showCheck = false;
+    if (state.myTurn && a) {
+      if (a.toCallBB != null) {
+        showCall = a.toCallBB > 0;
+        showCheck = !showCall;
+      } else {
+        // 빅블라인드를 못 읽어 금액을 모를 때만 페이지 버튼 상태로 판단
+        showCall = a.canCall;
+        showCheck = !a.canCall && a.canCheck;
+      }
     }
+    call.style.display = showCall ? 'block' : 'none';
+    check.style.display = showCheck ? 'block' : 'none';
+    call.innerHTML = '콜<span class="bb">+' +
+      (a && a.toCallBB != null ? fmtBB(a.toCallBB) + ' BB' : '?') + '</span>';
 
     // Fold 버튼: 내 차례=즉시(빨강) / 미리폴드 예약=회색
     const fold = overlayEls.fold;
     fold.style.display = (state.hasCards || state.myTurn) ? 'block' : 'none';
     if (state.myTurn) {
-      fold.textContent = 'Fold';
+      fold.textContent = '폴드';
       fold.classList.remove('armed');
     } else if (state.foldArmed) {
-      fold.textContent = '폴드 예약됨';
+      fold.textContent = '폴드 예약';
       fold.classList.add('armed');
     } else {
       fold.textContent = '미리 폴드';
       fold.classList.remove('armed');
     }
   }
+
+  // 역산한 제한시간이 흔히 쓰는 값에 가까우면 그 값으로 맞춘다.
+  // (표본 오차가 남아도 "23초" 대신 정확한 초가 나오도록)
+  const COMMON_TURN_LIMITS = [10, 15, 20, 25, 30, 40, 45, 60, 90, 120];
+  function snapTurnLimit(sec) {
+    for (const c of COMMON_TURN_LIMITS) {
+      if (Math.abs(sec - c) / c <= 0.12) return c;
+    }
+    return sec;
+  }
+
+  // 내 차례 남은 시간 바 (0.2초마다 부드럽게 갱신)
+  function paintTimer() {
+    if (!overlayEls) return;
+    const { bar, barFill, turntext } = overlayEls;
+    if (!lastState.myTurn || !turnTimer.active) {
+      barFill.style.width = '100%';
+      bar.classList.remove('warn', 'crit');
+      turntext.textContent = '';   // 대기중일 땐 위의 "지금 차례" 칸이 알려준다
+      return;
+    }
+    const domRatio = readTurnRemainRatio();
+    const now = Date.now();
+    const elapsed = (now - turnTimer.t0) / 1000;
+    let ratio, left = null;
+
+    if (domRatio != null) {
+      ratio = domRatio;
+      if (domRatio > turnTimer.r + 0.004) {
+        // 타임뱅크가 붙어 바가 다시 늘어남 → 기준점을 버리고 다시 잰다
+        turnTimer.aT = 0; turnTimer.aR = 0;
+      } else if (domRatio < turnTimer.r - 0.004 && !turnTimer.aT) {
+        // 바가 처음 줄어든 순간을 기준점으로 잡는다
+        turnTimer.aT = now; turnTimer.aR = domRatio;
+      }
+      turnTimer.r = domRatio;
+
+      // 기준점 이후의 평균 하락 속도로 전체 제한시간을 역산
+      // (테이블이 몇 초로 설정돼 있든 자동으로 맞고, 시간이 갈수록 정확해진다)
+      const dt = (now - turnTimer.aT) / 1000;
+      const dropped = turnTimer.aR - domRatio;
+      // 처음 2초는 표본이 모자라 값이 튀므로 초 표시를 보류한다 (바는 그동안에도 정확)
+      if (turnTimer.aT && dt > 2 && dropped > 0.02) left = ratio * snapTurnLimit(dt / dropped);
+    } else {
+      // 타이머 바 자체가 없는 테이블(제한시간 없음) → 흘러간 시간만 보여준다
+      ratio = 1;
+    }
+
+    barFill.style.width = (ratio * 100).toFixed(1) + '%';
+    bar.classList.toggle('warn', ratio <= 0.5 && ratio > 0.25);
+    bar.classList.toggle('crit', ratio <= 0.25);
+    turntext.textContent = left != null
+      ? '내 차례 · ' + Math.ceil(left) + '초'
+      : '내 차례 · ' + Math.floor(elapsed) + '초 경과';
+  }
+  setInterval(paintTimer, 200);
 
   // 헤더를 잡고 드래그해 위치 이동
   function makeDraggable(box, handle) {
@@ -717,24 +1123,16 @@
     return false;
   }
 
-  // 콜 / 체크 버튼 클릭 (사용자가 콜 버튼을 눌렀을 때만 호출됨)
-  function clickActionByText(selectors, exactWords) {
-    for (const sel of selectors) {
-      let btn = null;
-      try { btn = document.querySelector(sel); } catch (e) {}
-      if (btn && isClickable(btn)) { btn.click(); return true; }
-    }
-    const candidates = Array.from(document.querySelectorAll('button, [role="button"], .action-button'));
-    for (const el of candidates) {
-      const t = (el.textContent || '').trim().toLowerCase();
-      if (exactWords.some((w) => t === w || t.startsWith(w + ' ')) && isClickable(el)) { el.click(); return true; }
-    }
-    return false;
+  // 콜 / 체크 버튼 클릭 (사용자가 오버레이 버튼을 눌렀을 때만 호출됨)
+  // 패널에 버튼을 띄울 때와 똑같은 findActionButton 을 쓰므로, 보이면 반드시 눌린다.
+  function clickFound(kind) {
+    const btn = findActionButton(kind);
+    if (!btn) return false;
+    btn.click();
+    return true;
   }
-  const clickCallButton = () =>
-    clickActionByText(['.action-buttons .call', '.action-button.call'], ['call', '콜']);
-  const clickCheckButton = () =>
-    clickActionByText(['.action-buttons .check', '.action-button.check'], ['check', '체크']);
+  const clickCallButton = () => clickFound('call');
+  const clickCheckButton = () => clickFound('check');
 
   function isClickable(el) {
     if (!el || el.disabled) return false;
