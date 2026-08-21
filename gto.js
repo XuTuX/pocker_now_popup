@@ -254,7 +254,9 @@
         if (ctx.potBB == null || ctx.potBB <= 0) return { action: 'wait', reason: '팟 크기 모름' };
         const vRange = shoveRangeFor(faced);
         const eq = equityCached(ctx.c1, ctx.c2, [], vRange, ctx.iterations).equity;
-        const required = toCall / (ctx.potBB + toCall);
+        // 멀티웨이일수록 콜 기준을 올린다 (헤즈업 에퀴티 가정 보정)
+        const vCount = Math.max(1, ctx.villains != null ? ctx.villains : (ctx.tableSize || 1) - 1);
+        const required = Math.min(0.95, (toCall / (ctx.potBB + toCall)) * (1 + 0.12 * Math.max(0, vCount - 1)));
         const label = ctx.villainAllIn ? '올인' : '큰 베팅';
         return (eq - required >= 0.04)
           ? { action: 'call', reason: label + ' · 에퀴티 충분', equity: eq, required, confident: false }
@@ -361,7 +363,10 @@
     const R = RANGES[tierFor(ctx.tableSize)] || RANGES.six;
     const vRange = villainRangeFor(ctx, R);          // 사이즈가 크면 상대 레인지도 좁다
     const eq = equityCached(ctx.c1, ctx.c2, ctx.board, vRange, ctx.iterations);
-    const required = ctx.toCallBB / (ctx.potBB + ctx.toCallBB);
+    // 멀티웨이 보정: 헤즈업 1명 가정 에퀴티를 여러 상대에게 그대로 쓰면 콜을 너무 자주 한다.
+    // 상대 수가 많을수록 필요 에퀴티를 끌어올린다.
+    const vCount = Math.max(1, ctx.villains != null ? ctx.villains : 1);
+    const required = Math.min(0.95, (ctx.toCallBB / (ctx.potBB + ctx.toCallBB)) * (1 + 0.12 * Math.max(0, vCount - 1)));
     const CALL_MARGIN = 0.04;  // 이 정도 에퀴티 여유가 있어야 콜
     const FOLD_MARGIN = 0.02;  // 이보다 크게 부족하면 폴드
     const gap = eq.equity - required;

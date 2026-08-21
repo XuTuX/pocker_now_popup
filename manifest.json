@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PokerNow Hand Alert",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "PokerNow 테이블에서 내 홀카드를 읽어 오버레이로 보여주고, 원하면 지정한 핸드가 아닐 때 자동으로 폴드합니다. (자동 폴드는 기본 꺼짐)",
 
   "permissions": ["storage"],

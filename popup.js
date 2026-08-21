@@ -153,10 +153,18 @@ el('openOptions').addEventListener('click', (e) => {
 });
 
 // 열려있는 PokerNow 탭을 찾는다 (활성 탭이 아니어도 됨).
-// host_permissions(pokernow.club) 덕분에 URL 패턴으로 탭을 조회할 수 있다.
+// host_permissions 덕분에 URL 패턴으로 탭을 조회할 수 있다.
+// 여러 탭이면 "활성 탭"을 우선한다 (다른 탭에 폴드를 잘못 보내는 사고 방지).
 function findPokerNowTab(callback) {
-  chrome.tabs.query({ url: 'https://*.pokernow.club/*' }, (tabs) => {
-    callback(tabs && tabs.length ? tabs[0] : null);
+  const urls = [
+    'https://*.pokernow.com/*',
+    'https://pokernow.com/*',
+    'https://*.pokernow.club/*',
+    'https://pokernow.club/*'
+  ];
+  chrome.tabs.query({ url: urls }, (tabs) => {
+    if (!tabs || !tabs.length) return callback(null);
+    callback(tabs.find((t) => t.active) || tabs[0]);
   });
 }
 
