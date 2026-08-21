@@ -124,6 +124,29 @@
     }
   };
 
+  /* ===== 큰 사이즈(3벳·올인) 전용 레인지 =================================
+   * 사이즈가 커지면 ① 상대 레인지는 좁아지고 ② 내가 콜하려면 더 좋은 패가 필요하다.
+   * 위의 RANGES 는 "2.5~4BB 오픈에 직면" 을 가정한 표라서, 그것보다 큰 돈을
+   * 요구받았을 때 그대로 쓰면 안 된다. (예전엔 3BB 오픈이든 100BB 올인이든
+   * 같은 표로 22 를 콜했다) 인원수와 상관없이 이 공용 레인지를 쓴다.
+   * ===================================================================== */
+  const BIG = {
+    // 3벳 사이즈(≈7~12BB)에 직면했을 때
+    CALL_VS_3BET: 'TT+, AJs+, KQs, AQo+',
+    FOURBET:      'QQ+, AKs, AKo, A5s',
+    // 상대가 올인/초대형 베팅으로 밀어넣을 만한 레인지 (그 금액이 깊을수록 좁다)
+    SHOVE_SHORT: '22+, A2s+, K7s+, Q9s+, J9s+, T9s, A7o+, K9o+, QTo+, JTo',  // ~15BB
+    SHOVE_MID:   '55+, A7s+, K9s+, QTs+, JTs, ATo+, KJo+',                    // 15~35BB
+    SHOVE_DEEP:  '99+, AJs+, KQs, AQo+',                                      // 35BB~
+    // 포스트플롭에서 상대가 크게 걸었을 때의 레인지
+    POT_BET: '22+, A2s+, KTs+, QTs+, JTs, T9s, 98s, ATo+, KJo+',
+    OVERBET: 'TT+, AJs+, KQs, AQo+'
+  };
+
+  // 상대가 밀어넣은 금액(BB) → 그 사이즈로 올인할 만한 레인지
+  const shoveRangeFor = (facedBB) =>
+    facedBB <= 15 ? BIG.SHOVE_SHORT : (facedBB <= 35 ? BIG.SHOVE_MID : BIG.SHOVE_DEEP);
+
   /* ===== 내부 도구 ======================================================== */
 
   const rangeCache = {};
@@ -163,6 +186,27 @@
     return (p === 'HJ' || p === 'CO' || p === 'BTN' || p === 'SB' || p === 'BB' || p === 'UTG') ? p : 'UTG';
   }
 
+  /* ===== 레이즈 사이즈 =====================================================
+   * PokerNow 입력창은 "raise to"(이번 스트리트에 낼 총액) 를 받는다.
+   * 그래서 여기서 내는 숫자도 전부 "총액(BB)" 이다.
+   *   오픈      : 2.5BB + 림퍼 1명당 1BB
+   *   BB 아이솔 : 4BB   + 림퍼 1명당 1BB
+   *   3벳       : 상대 총액 × 3 (내가 SB/BB 면 ×4) + 죽은 돈
+   *   포스트플롭: 벳 = 팟의 60% / 레이즈 = 상대 총액 × 3
+   * 스택의 75% 를 넘게 들어가면 어차피 커밋이라 그냥 올인한다.
+   * ======================================================================= */
+
+  const roundHalfBB = (x) => Math.round(x * 2) / 2;
+
+  // to = 내가 만들고 싶은 총액(BB), top = 지금 맞춰야 하는 총액(BB)
+  function clampSize(ctx, to, top) {
+    const mine = ctx.myBetBB || 0;
+    const allIn = (ctx.stackBB != null ? ctx.stackBB : Infinity) + mine; // 올인 상한
+    let v = Math.max(to, top > 0 ? top * 2 : 1);   // 최소 레이즈(상대 총액의 2배) 보장
+    if (v >= allIn * 0.75) v = allIn;              // 75% 넘으면 그냥 올인
+    return Math.min(roundHalfBB(v), allIn);
+  }
+
   /* ===== 프리플롭 결정 ==================================================== */
 
   function preflopAction(ctx) {
@@ -175,16 +219,66 @@
 
     const R = RANGES[tierFor(ctx.tableSize)] || RANGES.six;
 
-    // BB 처리: 더 낼 돈 0 = 옵션(무료 체크), 0 초과 = 레이즈에 직면
-    if (pos === 'BB') {
-      if (toCall <= 0.01) {
-        if (ctx.aggroAuto && inRange(h, R.BB_ISO)) return { action: 'raise', reason: 'BB 아이솔' };
-        return { action: 'check', reason: 'BB 옵션' };
+    // 레이즈 사이즈 재료: 맞춰야 하는 총액 / 죽은 돈(림퍼) / 내 포지션
+    const faced = toCall + (ctx.myBetBB || 0);   // 맞추려면 이번 스트리트에 총 얼마를 내야 하나
+    const top = Math.max(faced, 1);
+    const dead = Math.max(0, ctx.limpers || 0);
+    const oop = (pos === 'SB' || pos === 'BB');
+    const sizeOf = (kind) => clampSize(ctx,
+      kind === 'open' ? 2.5 + dead
+      : kind === 'iso' ? 4 + dead
+      : top * (oop ? 4 : 3) + dead, top);
+
+    // BB 옵션 (더 낼 돈 0 = 공짜)
+    if (pos === 'BB' && toCall <= 0.01) {
+      if (ctx.aggroAuto && inRange(h, R.BB_ISO)) return { action: 'raise', reason: 'BB 아이솔', sizeBB: sizeOf('iso') };
+      return { action: 'check', reason: 'BB 옵션' };
+    }
+
+    /* ── 사이즈 게이트 ────────────────────────────────────────────────
+     * 아래 차트(VS_RAISE_*, BB_*)는 전부 "2.5~4BB 오픈" 을 가정한 표다.
+     * 그것보다 큰 돈을 요구받았으면 표를 그대로 쓰면 안 된다. */
+    if (toCall >= 0.01) {
+      // 올인이거나 / 12BB 이상이거나 / 내 스택의 35% 이상을 요구받으면
+      // 표가 아니라 "에퀴티 vs 팟 오즈" 로 판단한다 (프리플롭 올인 계산).
+      const commit = (ctx.stackBB != null && ctx.stackBB > 0) ? toCall / ctx.stackBB : null;
+      const huge = !!ctx.villainAllIn || faced >= 12 || (commit != null && commit >= 0.35);
+
+      if (huge) {
+        // 내가 프리미엄이고 상대가 올인이 아니면 되받아친다 (보통 올인 사이즈가 나온다)
+        if (inRange(h, BIG.FOURBET) && !ctx.villainAllIn) {
+          return ctx.aggroAuto
+            ? { action: 'raise', reason: '4벳', sizeBB: clampSize(ctx, faced * 2.4, faced), confident: false }
+            : { action: 'wait', reason: '레이즈 권장', sizeBB: clampSize(ctx, faced * 2.4, faced), confident: false };
+        }
+        if (ctx.potBB == null || ctx.potBB <= 0) return { action: 'wait', reason: '팟 크기 모름' };
+        const vRange = shoveRangeFor(faced);
+        const eq = equityCached(ctx.c1, ctx.c2, [], vRange, ctx.iterations).equity;
+        const required = toCall / (ctx.potBB + toCall);
+        const label = ctx.villainAllIn ? '올인' : '큰 베팅';
+        return (eq - required >= 0.04)
+          ? { action: 'call', reason: label + ' · 에퀴티 충분', equity: eq, required, confident: false }
+          : { action: 'fold', reason: label + ' · 에퀴티 부족', equity: eq, required, confident: true };
       }
+
+      // 3벳 사이즈(4.5BB 초과 ~ 12BB): 오픈용 표 대신 좁은 표를 쓴다
+      if (faced > 4.5) {
+        if (inRange(h, BIG.FOURBET)) {
+          return ctx.aggroAuto
+            ? { action: 'raise', reason: '4벳', sizeBB: sizeOf('3bet'), confident: false }
+            : { action: 'wait', reason: '레이즈 권장', sizeBB: sizeOf('3bet'), confident: false };
+        }
+        if (inRange(h, BIG.CALL_VS_3BET)) return { action: 'call', reason: '3벳에 콜' };
+        return { action: 'fold', reason: '3벳 · 폴드', confident: true };
+      }
+    }
+
+    // BB 처리: 여기부터는 "평범한 오픈에 직면" 이다
+    if (pos === 'BB') {
       if (inRange(h, R.BB_3BET)) {
         return ctx.aggroAuto
-          ? { action: 'raise', reason: 'BB 3벳', confident: false }
-          : { action: 'wait', reason: '레이즈 권장', confident: false };
+          ? { action: 'raise', reason: 'BB 3벳', sizeBB: sizeOf('3bet'), confident: false }
+          : { action: 'wait', reason: '레이즈 권장', sizeBB: sizeOf('3bet'), confident: false };
       }
       if (inRange(h, R.BB_CALL)) return { action: 'call', reason: '콜' };
       return { action: 'fold', reason: '폴드', confident: true };
@@ -196,7 +290,9 @@
     // 레이즈 없음 (림프만) — 열린 레인지 기준
     if (toCall <= 1.01) {
       if (inRange(h, R.RFI[pos] || '')) {
-        if (ctx.aggroAuto && pos !== 'BB') return { action: 'raise', reason: '아이솔' };
+        if (ctx.aggroAuto && pos !== 'BB') {
+          return { action: 'raise', reason: dead ? '아이솔' : '오픈', sizeBB: sizeOf(dead ? 'iso' : 'open') };
+        }
         return { action: 'call', reason: '림프 콜' };
       }
       return { action: 'fold', reason: '림프 폴드', confident: true };
@@ -205,8 +301,8 @@
     // 오픈 레이즈에 직면
     if (inRange(h, R.VS_RAISE_3BET[pos] || '')) {
       return ctx.aggroAuto
-        ? { action: 'raise', reason: '3벳', confident: false }
-        : { action: 'wait', reason: '레이즈 권장', confident: false };
+        ? { action: 'raise', reason: '3벳', sizeBB: sizeOf('3bet'), confident: false }
+        : { action: 'wait', reason: '레이즈 권장', sizeBB: sizeOf('3bet'), confident: false };
     }
     if (inRange(h, R.VS_RAISE_CALL[pos] || '')) return { action: 'call', reason: '콜' };
     return { action: 'fold', reason: '폴드', confident: true };
@@ -215,37 +311,74 @@
   /* ===== 포스트플롭 결정 (에퀴티 vs 팟 오즈) ============================= */
 
   let eqCache = null; // { key, t, e }
-  function equityCached(c1, c2, board, tier, iterations) {
-    const key = tier + '|' +
+  // 상대 레인지 문자열을 그대로 받는다 — 같은 보드라도 상대가 건 사이즈에 따라
+  // 레인지가 달라지므로 캐시 키에도 레인지가 들어가야 한다.
+  function equityCached(c1, c2, board, rangeStr, iterations) {
+    const key = rangeStr + '|' +
       [c1.rank + c1.suit, c2.rank + c2.suit].sort().join('|') +
       '#' + board.map((c) => c.rank + c.suit).sort().join('');
     const now = Date.now();
     if (eqCache && eqCache.key === key && now - eqCache.t < 4000) return eqCache.e;
-    const R = RANGES[tier] || RANGES.six;
-    const e = equityVsRange([c1, c2], board, buildRange(R.VILLAIN).combos, iterations);
+    const e = equityVsRange([c1, c2], board, buildRange(rangeStr).combos, iterations);
     eqCache = { key, t: now, e };
     return e;
   }
 
+  // 상대가 이번 스트리트에 건 돈이 팟 대비 얼마나 큰지로 상대 레인지를 좁힌다.
+  //   ~55% 팟 → 평소 레인지 / 55~100% → 좁게 / 100%↑·올인 → 아주 좁게
+  function villainRangeFor(ctx, R) {
+    const pot = ctx.potBB || 0, bet = ctx.toCallBB || 0;
+    if (!pot || !bet) return R.VILLAIN;
+    if (ctx.villainAllIn || bet / pot >= 1) return BIG.OVERBET;
+    if (bet / pot >= 0.55) return BIG.POT_BET;
+    return R.VILLAIN;
+  }
+
+  const VALUE_BET_EQ = 0.68;   // 아무도 안 걸었을 때 밸류 벳을 넣는 에퀴티
+  const VALUE_RAISE_EQ = 0.72; // 상대 베팅에 레이즈로 올리는 에퀴티
+
   function postflopAction(ctx) {
     if (ctx.toCallBB == null) return { action: 'wait', reason: '콜 금액 모름' };
-    if (ctx.toCallBB <= 0.01) return { action: 'check', reason: '무료 체크' };
-    if (!ctx.board || ctx.board.length < 3) return { action: 'wait', reason: '보드 부족' };
-    if (ctx.potBB == null || ctx.potBB <= 0) return { action: 'wait', reason: '팟 크기 모름' };
+    const boardOk = ctx.board && ctx.board.length >= 3 && ctx.potBB != null && ctx.potBB > 0;
 
-    const tier = tierFor(ctx.tableSize);
-    const eq = equityCached(ctx.c1, ctx.c2, ctx.board, tier, ctx.iterations);
+    // 아무도 안 걸었다 → 보통은 공짜 체크. 단 에퀴티가 아주 좋고 레이즈=자동이면 밸류 벳.
+    if (ctx.toCallBB <= 0.01) {
+      if (ctx.aggroAuto && boardOk) {
+        const RR = RANGES[tierFor(ctx.tableSize)] || RANGES.six;
+        const e = equityCached(ctx.c1, ctx.c2, ctx.board, RR.VILLAIN, ctx.iterations);
+        if (e.equity >= VALUE_BET_EQ) {
+          return { action: 'raise', reason: '밸류 벳', equity: e.equity,
+                   sizeBB: clampSize(ctx, ctx.potBB * 0.6, 0) };
+        }
+      }
+      return { action: 'check', reason: '무료 체크' };
+    }
+    if (!boardOk) {
+      if (!ctx.board || ctx.board.length < 3) return { action: 'wait', reason: '보드 부족' };
+      return { action: 'wait', reason: '팟 크기 모름' };
+    }
+
+    const R = RANGES[tierFor(ctx.tableSize)] || RANGES.six;
+    const vRange = villainRangeFor(ctx, R);          // 사이즈가 크면 상대 레인지도 좁다
+    const eq = equityCached(ctx.c1, ctx.c2, ctx.board, vRange, ctx.iterations);
     const required = ctx.toCallBB / (ctx.potBB + ctx.toCallBB);
     const CALL_MARGIN = 0.04;  // 이 정도 에퀴티 여유가 있어야 콜
     const FOLD_MARGIN = 0.02;  // 이보다 크게 부족하면 폴드
     const gap = eq.equity - required;
 
-    let action, reason;
-    if (gap >= CALL_MARGIN) { action = 'call'; reason = '에퀴티 충분'; }
+    let action, reason, sizeBB = null;
+    if (gap >= CALL_MARGIN) {
+      // 상대가 이미 올인이면 올릴 곳이 없다 — 콜만 가능
+      if (ctx.aggroAuto && !ctx.villainAllIn && eq.equity >= VALUE_RAISE_EQ) {
+        // 상대 총액의 3배로 올린다 (레이즈=자동일 때만)
+        const top = ctx.toCallBB + (ctx.myBetBB || 0);
+        action = 'raise'; reason = '밸류 레이즈'; sizeBB = clampSize(ctx, top * 3, top);
+      } else { action = 'call'; reason = '에퀴티 충분'; }
+    }
     else if (gap <= -FOLD_MARGIN) { action = 'fold'; reason = '에퀴티 부족'; }
     else { action = 'fold'; reason = '경계 · 폴드'; } // 애매하면 폴드 (안전)
     return {
-      action, reason,
+      action, reason, sizeBB,
       equity: eq.equity, required,
       confident: action === 'fold' && Math.abs(gap) > 0.08
     };
@@ -254,8 +387,11 @@
   /* ===== 진입점 ========================================================== */
 
   // ctx: { c1, c2, hand, position, board, street(보드 장수),
-  //        toCallBB, potBB, stackBB, tableSize(이번 핸드 인원수),
+  //        toCallBB, potBB, stackBB, myBetBB(이번 스트리트 내 베팅),
+  //        limpers(프리플롭 림퍼 수), villainAllIn(상대 올인 여부),
+  //        tableSize(이번 핸드 인원수),
   //        aggroAuto, streetMode('preflop'|'all'), iterations }
+  // 반환: { action, reason, sizeBB(레이즈일 때 "총 얼마까지" · BB), equity, required }
   function decide(ctx) {
     try {
       if (!ctx || !ctx.hand) return { action: 'wait', reason: '핸드 없음' };

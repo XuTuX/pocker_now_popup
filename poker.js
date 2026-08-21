@@ -204,6 +204,20 @@
   }
 
   // "XYs+"/"XYo+" 처럼 "+"가 붙은 그룹 하나 → 콤보 배열 (탑카드 고정, 키커 lo~hi-1)
+  // 정확히 그 핸드만. (A5s = A5s 4콤보)
+  // ★ 예전엔 여기서도 expandPlusGroup 을 써서 A5s 가 A5s+(A5s..AQs) 로 번졌다.
+  //   차트에 'A5s, A4s' 라고 적어두면 수딧 에이스 전부가 들어가버렸다.
+  function expandExact(r1, r2, suited) {
+    const hi = Math.max(r1, r2), lo = Math.min(r1, r2);
+    const out = [];
+    if (suited) {
+      for (const s of SUITS) out.push({ r1: hi, s1: s, r2: lo, s2: s });
+    } else {
+      for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) if (i !== j) out.push({ r1: hi, s1: SUITS[i], r2: lo, s2: SUITS[j] });
+    }
+    return out;
+  }
+
   function expandPlusGroup(r1, r2, suited) {
     const hi = Math.max(r1, r2), lo = Math.min(r1, r2);
     const out = [];
@@ -245,7 +259,7 @@
         const exact = p.match(/^([2-9TJQKA])([2-9TJQKA])([so])$/);
         if (exact) {
           const a = RANK_NUM(exact[1]), b = RANK_NUM(exact[2]);
-          out.push(...expandPlusGroup(a, b, exact[3] === 's'));
+          out.push(...expandExact(a, b, exact[3] === 's'));
           continue;
         }
         // 인식 못 하는 표기 → 조용히 무시 (차트에 오타가 있어도 크래시 방지)

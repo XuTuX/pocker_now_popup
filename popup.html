@@ -66,7 +66,7 @@
     <div id="autoWarn" class="auto-warn">지정 핸드가 아니면 카드를 받자마자 PokerNow 의 <b>미리 폴드</b>를 눌러둡니다. 내 차례가 오면 폴드되고, 그 전에 오버레이의 <b>취소</b>를 누르면 취소됩니다.</div>
   </section>
 
-  <!-- GTO 자동 콜/폴드: autoFold 위에서 동작 (켜면 프리미엄 목록 대신 GTO 차트 사용) -->
+  <!-- GTO 자동 액션: 자동 폴드와 별개로 동작 (켜면 프리미엄 목록 대신 GTO 차트 사용) -->
   <section id="gtoSection" class="auto-section">
     <div class="row">
       <span class="label">🧠 GTO 자동 콜/폴드</span>
@@ -90,7 +90,7 @@
           <option value="auto">자동으로 누르기</option>
         </select>
       </div>
-      <div class="auto-warn">GTO 모드는 내 차례에 N초 뒤 자동으로 콜/체크/폴드를 실행합니다. 차트는 <b>테이블 인원수(2~9명)에 맞춰 자동 전환</b>되는 100BB 근사치이며 <b>gto.js</b> 에서 수정할 수 있습니다.</div>
+      <div class="auto-warn">GTO 모드는 <b>자동 폴드와 따로</b> 동작하며, 내 차례에 위의 대기 시간이 지나면 콜/체크/폴드를 실행합니다. 레이즈를 <b>자동으로 누르기</b>로 두면 GTO 사이즈(오픈 2.5BB · 3벳 ×3 등)를 <b>금액칸에 입력한 뒤 확인까지</b> 눌러줍니다. 차트는 <b>테이블 인원수(2~9명)에 맞춰 자동 전환</b>되는 100BB 근사치이며 <b>gto.js</b> 에서 수정할 수 있습니다.</div>
     </div>
   </section>
 

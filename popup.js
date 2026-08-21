@@ -97,7 +97,8 @@ function readForm() {
  *  그래서 스위치만 만지고 팝업을 닫으면 화면과 실제 설정이 달라졌다.) */
 function saveNow() {
   const form = readForm();
-  if (form.gtoMode) form.autoFold = true;   // GTO 모드는 자동 폴드 스위치 위에서 동작
+  // GTO 모드는 이제 자동 폴드와 별개로 동작한다 (예전엔 여기서 autoFold 를 몰래 켰는데,
+  // 나중에 GTO 를 끄면 자동 폴드만 켜진 채 남아서 원치 않는 폴드가 나갔다)
   settings = Object.assign({}, settings, form);
   chrome.storage.local.set({ settings }, () => {
     renderStatusText();

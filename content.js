@@ -267,19 +267,37 @@
   // 화면에 보이는 내 스택. PokerNow 는 (스택 − 이번 스트리트 베팅) 을 표시한다.
   const readHeroStack = () => chipsIn((heroSeat() || document).querySelector(STACK_SELECTOR));
 
+  const ALLIN_RE = /all\s*-?\s*in|올\s*인/i;
+
   // 이번 스트리트의 내 베팅 / 테이블 최고 베팅 (원래 칩 단위)
+  //   unknown : 금액 없이 "All In" 만 찍힌 베팅이 있어서 최고 베팅을 못 믿는 상태
+  //             (이걸 0 으로 읽으면 "더 낼 돈 0" 이 되어 올인 앞에서 체크하려 든다)
+  //   allIn   : 상대 중 올인한 사람이 있다 (레인지·사이즈 판단에 쓴다)
   function readBets() {
     const hero = heroSeat();
-    let mine = 0, top = 0;
+    let mine = 0, top = 0, unknown = false, allIn = false;
     for (const seat of document.querySelectorAll('.table-player')) {
       const betEl = seat.querySelector(BET_SELECTOR);
-      const v = (betEl && isVisible(betEl)) ? chipsIn(betEl) : null; // 안 보이는 베팅은 없는 것
+      if (!betEl || !isVisible(betEl)) continue;
+      const isHero = hero && seat === hero;
+      const num = betEl.querySelector('.normal-value');
+      const v = chipsIn(betEl);                       // 안 보이는 베팅은 위에서 걸렀다
 
-      if (v == null) continue;              // 베팅 없음 또는 "check"
+      if (!num && ALLIN_RE.test(betEl.textContent || '')) {
+        if (!isHero) { unknown = true; allIn = true; } // 금액을 못 읽는 올인
+        continue;
+      }
+      if (v == null) continue;                        // 베팅 없음 또는 "check"
       if (v > top) top = v;
-      if (hero && seat === hero) mine = v;
+      if (isHero) mine = v;
+      // 돈은 걸었는데 스택이 0 / "All In" → 이 사람은 올인이다
+      if (!isHero && v > 0) {
+        const stEl = seat.querySelector(STACK_SELECTOR);
+        const stTxt = stEl ? (stEl.textContent || '') : '';
+        if (stEl && (ALLIN_RE.test(stTxt) || chipsIn(stEl) === 0)) allIn = true;
+      }
     }
-    return { mine, top };
+    return { mine, top, unknown, allIn };
   }
 
   // 팟(총 금액) 표시 후보 — PokerNow 는 테이블 중앙에 팟을 보여준다.
@@ -292,24 +310,54 @@
     '.pot-ctn .normal-value',
     '.pot-value-ctn .normal-value'
   ];
-  // 이번 스트리트의 총 팟 (원래 칩 단위). 중앙 팟 표시 우선, 없으면 전 좌석 베팅 합.
-  function readPot() {
+  // 중앙 팟 표시값 (아직 안 걷힌 이번 스트리트 베팅은 보통 여기 안 들어간다)
+  function readCentralPot() {
     for (const sel of POT_SELECTORS) {
       const el = document.querySelector(sel);
       const v = el ? chipsIn(el) : null;
       if (v != null && v > 0) return v;
     }
-    let sum = 0, found = false;
+    return null;
+  }
+
+  // 이번 스트리트에 자리 앞에 나와 있는 돈의 합
+  function sumSeatBets() {
+    let sum = 0;
     for (const seat of document.querySelectorAll('.table-player')) {
       const betEl = seat.querySelector(BET_SELECTOR);
       const v = (betEl && isVisible(betEl)) ? chipsIn(betEl) : null;
-      if (v != null && v > 0) { sum += v; found = true; }
-    }
-    if (!found) {
-      const { sb, bb } = getBlinds();
-      if (sb && bb) return sb + bb;
+      if (v != null && v > 0) sum += v;
     }
     return sum;
+  }
+
+  /* 팟 오즈에 쓰는 "지금 팟" = 중앙 팟 + 아직 안 걷힌 베팅.
+   * ★ 상대 베팅을 빼먹으면 필요 에퀴티가 폭등한다. (팟 1.5BB 에 20BB 올인이
+   *   들어왔을 때 20/(1.5+20)=93% 가 되어 AA 도 폴드한다. 실제로는
+   *   20/(21.5+20)=48% 다.)
+   * 스킨에 따라 중앙 팟이 이미 베팅을 포함하기도 해서, 베팅이 0 이던 순간의
+   * 값을 기준점으로 잡아두고 "베팅이 생길 때 중앙 팟도 같이 뛰는지" 로 학습한다.
+   * 모르는 동안은 더하는 쪽(안전한 쪽)을 쓴다. */
+  let potIncludesBets = null;   // null = 아직 모름
+  let potBase = null;           // 베팅이 0 이던 때의 중앙 팟
+  function readPot() {
+    const central = readCentralPot();
+    const sum = sumSeatBets();
+
+    if (sum === 0) potBase = central;              // 스트리트 시작(또는 베팅 전) 기준점
+    else if (central != null && potBase != null) {
+      const delta = central - potBase;
+      if (delta >= sum * 0.9) potIncludesBets = true;
+      else if (delta <= sum * 0.1) potIncludesBets = false;
+    }
+    if (central != null && sum > 0 && central < sum) potIncludesBets = false; // 확실히 미포함
+
+    if (central == null) {
+      if (sum > 0) return sum;
+      const { sb, bb } = getBlinds();
+      return (sb && bb) ? sb + bb : 0;
+    }
+    return potIncludesBets ? central : central + sum;
   }
 
   // 콜/체크 버튼 찾기: 클래스 토큰 → 버튼 텍스트 순. (스킨·언어가 달라도 잡히도록)
@@ -331,28 +379,223 @@
   }
 
   // 레이즈/베트 버튼 찾기 (PokerNow: .raise/.bet, 텍스트 "Raise"/"Bet"/"레이즈")
-  function findRaiseButton() {
+  // plainOnly=true 면 금액이 적히지 않은 버튼만 (= 패널을 여는 용도) 돌려준다.
+  function findRaiseButton(plainOnly) {
     const roots = ACTION_ROOT_SELECTORS.map((s) => document.querySelector(s)).filter(Boolean);
     roots.push(document);
     const clsRe = /\b(raise|bet|all-in|allin)\b/;
+    const ok = (el) => isClickable(el) && !(plainOnly && /\d/.test(el.textContent || ''));
     for (const root of roots) {
       const btns = Array.from(root.querySelectorAll('button, .action-button, [role="button"]'));
       for (const el of btns) {
-        if (clsRe.test((el.className || '').toString().toLowerCase()) && isClickable(el)) return el;
+        if (clsRe.test((el.className || '').toString().toLowerCase()) && ok(el)) return el;
       }
       for (const el of btns) {
         const t = (el.textContent || '').trim().toLowerCase();
-        if (/(raise|레이즈|bet|베팅|올\s*인)/.test(t) && isClickable(el)) return el;
+        if (/(raise|레이즈|bet|베팅|올\s*인)/.test(t) && ok(el)) return el;
       }
     }
     return null;
   }
 
-  function clickRaiseButton() {
-    const btn = findRaiseButton();
-    if (!btn) return false;
-    btn.click();
-    return true;
+  /* ===== 레이즈 실행: 금액 입력 → 확인 버튼 ==============================
+   * 레이즈 버튼 한 번 누르는 걸로는 레이즈가 되지 않는다. PokerNow 는
+   *   ① 금액 입력칸(+슬라이더) 에 "총 얼마까지 올릴지" 를 넣고
+   *   ② 확인 버튼("Raise to 1,200") 을 눌러야
+   * 액션이 전송된다. 게다가 입력칸이 React 컨트롤드라서 el.value = x 로는
+   * 프레임워크가 값이 바뀐 걸 모른다 → 네이티브 setter 로 넣고 input/change 를
+   * 직접 쏜다. 그래도 안 들어가면 포커스 후 타이핑(insertText) 을 흉내낸다.
+   * ===================================================================== */
+
+  // 금액 입력칸이 들어있을 만한 컨테이너 (앞쪽이 더 구체적)
+  const RAISE_FORM_SELECTORS = [
+    '.raise-controller-form', '.raise-controller', '.bet-controller',
+    '.raise-bet-value', '.action-buttons', '.game-decisions-ctn'
+  ];
+
+  // 금액 입력칸 찾기 → { num: 숫자칸, range: 슬라이더 }
+  function findAmountInputs() {
+    for (const sel of RAISE_FORM_SELECTORS) {
+      const out = { num: null, range: null };
+      for (const root of document.querySelectorAll(sel)) {
+        for (const inp of root.querySelectorAll('input')) {
+          const type = (inp.type || 'text').toLowerCase();
+          if (inp.disabled || !isVisible(inp)) continue;
+          if (type === 'range') { if (!out.range) out.range = inp; }
+          else if (type === 'number' || type === 'text' || type === 'tel') { if (!out.num) out.num = inp; }
+        }
+      }
+      if (out.num || out.range) return out;
+    }
+    return { num: null, range: null };
+  }
+
+  // 입력칸이 칩 단위인지 BB 단위인지. (PokerNow 는 BB 표시 모드가 있다)
+  // 입력칸의 max 는 곧 내 올인 금액이므로, 그게 칩과 맞는지 BB 와 맞는지로 가른다.
+  function amountUnit(inp, allInChips, bb) {
+    const max = parseFloat(inp && inp.max);
+    if (!isFinite(max) || !allInChips || !bb) return 'chips';
+    const near = (a, b) => Math.abs(a - b) <= Math.max(1, b * 0.12);
+    if (near(max, allInChips)) return 'chips';
+    if (near(max, allInChips / bb)) return 'bb';
+    return 'chips';
+  }
+
+  // React 컨트롤드 인풋에 값 넣기
+  function setNativeValue(el, value) {
+    const desc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value') ||
+                 Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+    if (desc && desc.set) desc.set.call(el, String(value));
+    else el.value = String(value);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  // 값이 실제로 들어갔는지 확인하고, 안 들어갔으면 타이핑을 흉내내 다시 시도
+  function setAmount(inp, value) {
+    const got = () => parseFloat(String(inp.value).replace(/,/g, ''));
+    setNativeValue(inp, value);
+    if (!(Math.abs(got() - value) <= 1.01)) {
+      try {
+        inp.focus();
+        if (inp.select) inp.select();
+        document.execCommand('insertText', false, String(value));
+        inp.dispatchEvent(new Event('change', { bubbles: true }));
+      } catch (e) { /* ignore */ }
+    }
+    return Math.abs(got() - value) <= 1.01;
+  }
+
+  // 확인(전송) 버튼. 프리셋(½ 팟 · 올인 등) 은 누르면 안 되므로 제외하고,
+  // 금액이 같이 적힌 버튼("Raise to 1,200") 을 우선한다.
+  const PRESET_RE = /(pot|팟|½|¾|1\/2|1\/3|2\/3|3\/4|min|최소|all\s*-?\s*in|올\s*인)/;
+  function findRaiseConfirm() {
+    for (const sel of RAISE_FORM_SELECTORS) {
+      const hits = [];
+      for (const root of document.querySelectorAll(sel)) {
+        for (const b of root.querySelectorAll('button, .action-button, [role="button"]')) {
+          if (!isClickable(b)) continue;
+          const t = (b.textContent || '').trim().toLowerCase();
+          if (PRESET_RE.test(t)) continue;
+          if (/(raise|bet|레이즈|베팅)/.test(t)) hits.push(b);
+        }
+      }
+      if (hits.length) return hits.find((b) => /\d/.test(b.textContent || '')) || hits[0];
+    }
+    return null;
+  }
+
+  // 레이즈 실행. targetChips = 이번 스트리트에 "총 얼마까지" 올릴지 (칩 단위).
+  // 입력칸이 뜨는 데 시간이 걸릴 수 있어 결과는 콜백으로 돌려준다.
+  // 레이즈가 실패하면 액션 영역 DOM 을 콘솔에 남긴다 (셀렉터를 고칠 단서)
+  function dumpActionArea() {
+    const parts = [];
+    for (const sel of RAISE_FORM_SELECTORS) {
+      for (const root of document.querySelectorAll(sel)) {
+        parts.push('[' + sel + '] ' + (root.outerHTML || '').slice(0, 1200));
+      }
+    }
+    console.warn('[PokerAlert] 레이즈 UI 를 못 찾음 — 액션 영역 DOM:\n' +
+                 (parts.join('\n') || '(액션 컨테이너 자체가 없음)'));
+  }
+
+  function performRaise(targetChips, done) {
+    const finish = (ok, why) => {
+      log('레이즈:', ok ? '성공' : '실패', why);
+      if (!ok) dumpActionArea();
+      if (done) done(ok, why);
+    };
+    const bb = getBigBlind();
+    const bets = readBets();
+    const stack = readHeroStack();
+    const allIn = (stack != null ? stack : 0) + (bets.mine || 0); // 이번 스트리트 최대치
+
+    const apply = () => {
+      const f = findAmountInputs();
+      const inp = f.num || f.range;
+      if (!inp) {                      // 금액칸이 끝내 없다 (올인 강제 등)
+        const b = findRaiseConfirm();
+        if (!b) return finish(false, '입력칸·확인 버튼 없음');
+        b.click();
+        return finish(true, '금액칸 없음 · 기본 금액으로 전송');
+      }
+
+      const unit = amountUnit(inp, allIn, bb);
+      let v = (unit === 'bb' && bb) ? targetChips / bb : targetChips;
+      const min = parseFloat(inp.min), max = parseFloat(inp.max);
+      if (isFinite(min) && v < min) v = min;      // 최소 레이즈보다 작으면 거절당한다
+      if (isFinite(max) && v > max) v = max;
+      v = (unit === 'bb') ? Math.round(v * 100) / 100 : Math.round(v);
+
+      if (f.range && f.range !== inp) setAmount(f.range, v);   // 슬라이더도 같이 맞춘다
+      const okSet = setAmount(inp, v);
+
+      // React 가 다시 그릴 틈을 주고 확인 버튼을 누른다
+      setTimeout(() => {
+        const b = findRaiseConfirm();
+        if (!b) return finish(false, '확인 버튼 없음');
+        b.click();
+        finish(true, okSet ? ('금액 ' + v + (unit === 'bb' ? 'BB' : '칩'))
+                           : ('금액 반영 실패 · 입력칸 값(' + inp.value + ') 그대로 전송'));
+      }, 60);
+    };
+
+    // 금액칸이 이미 떠 있으면 바로 입력, 아니면 레이즈 버튼으로 패널을 연다.
+    // ★ 이때는 금액이 안 적힌 버튼("Raise")을 고른다 — 금액이 적힌 버튼
+    //   ("Raise to 600")은 누르는 순간 그 금액으로 전송돼버리기 때문.
+    const now = findAmountInputs();
+    if (now.num || now.range) return apply();
+    const plain = findRaiseButton(true);
+    const opener = plain || findRaiseButton();
+    if (!opener) return finish(false, '레이즈 버튼 없음');
+    if (!plain) log('경고: 금액이 적힌 버튼밖에 없어 그대로 눌린다 —', opener.textContent);
+    opener.click();
+    let tries = 0;
+    const wait = () => {
+      const f = findAmountInputs();
+      if (f.num || f.range) return apply();
+      if (++tries >= 12) return finish(true, '입력칸이 안 떠서 버튼만 눌림'); // 이미 눌렀다
+      setTimeout(wait, 50);
+    };
+    setTimeout(wait, 50);
+  }
+
+  // GTO 가 낸 사이즈(BB 총액) → 칩. 사이즈를 모르면 최소 레이즈로 때운다.
+  function raiseTargetChips(dec) {
+    const bb = getBigBlind();
+    const { mine, top } = readBets();
+    const stack = readHeroStack();
+    const allIn = (stack != null ? stack : 0) + (mine || 0);
+    let chips = (dec && dec.sizeBB != null && bb) ? dec.sizeBB * bb
+              : Math.max((top || 0) * 2, (bb || 0) * 2.5);
+    if (allIn > 0) chips = Math.min(chips, allIn);
+    return Math.max(1, Math.round(chips));
+  }
+
+  // 레이즈 UI 디버그용 (DevTools 콘솔의 컨텍스트를 이 확장으로 바꾸면 쓸 수 있다)
+  //   __pnhaRaise.dump()        → 지금 액션 영역 DOM 을 콘솔에 출력
+  //   __pnhaRaise.to(1200)      → 총 1200칩까지 레이즈 (실제로 눌린다)
+  window.__pnhaRaise = {
+    dump: dumpActionArea,
+    inputs: findAmountInputs,
+    confirm: findRaiseConfirm,
+    target: raiseTargetChips,
+    to: (chips) => performRaise(chips, (ok, why) => console.log('[PokerAlert] 레이즈', ok, why)),
+    state: () => ({ settings, autoAct: Object.assign({}, autoAct, { timer: !!autoAct.timer }) })
+  };
+
+  // 프리플롭 림퍼 수 (레이즈 사이즈의 "죽은 돈"). BB 포스팅 1개는 빼준다.
+  function countLimpers(bb) {
+    if (!bb) return 0;
+    const hero = heroSeat();
+    let n = 0;
+    for (const seat of document.querySelectorAll('.table-player')) {
+      if (seat === hero) continue;
+      const betEl = seat.querySelector(BET_SELECTOR);
+      const v = (betEl && isVisible(betEl)) ? chipsIn(betEl) : null;
+      if (v != null && Math.abs(v - bb) < bb * 0.05) n += 1;
+    }
+    return Math.max(0, n - (heroBlindRole === 'BB' ? 0 : 1));
   }
 
   /* ===== 자리 순서 · 포지션 ============================================== */
@@ -504,13 +747,14 @@
   // 대신 (테이블 최고 베팅 − 내 베팅) 을 원래 칩 단위로 직접 계산한다.
   function getActionInfo(stack) {
     const bb = getBigBlind();
-    const { mine, top } = readBets();
+    const { mine, top, unknown } = readBets();
     let toCall = Math.max(0, top - mine);
     if (stack != null && toCall > stack) toCall = stack; // 스택보다 많이 콜할 수는 없다
     return {
       canCheck: !!findActionButton('check'),
       canCall: !!findActionButton('call'),
-      toCallBB: bb ? toCall / bb : null
+      // 금액 없는 올인이 섞여 있으면 "모름"(null) 으로 둔다 — 0 으로 읽으면 위험하다
+      toCallBB: (bb && !unknown) ? toCall / bb : null
     };
   }
 
@@ -634,6 +878,7 @@
       handStartStack = (idleStack != null) ? idleStack : stack;
       handSeats = new Set();
       heroBlindRole = null;
+      potBase = null;            // 팟 기준점도 핸드마다 다시 잡는다
     }
 
     const foldArmed = !myTurn && (preFoldArmed || isFoldArmedInDom());
@@ -657,11 +902,15 @@
     let gto = null;
     if (settings.gtoMode && hand && window.PNHAGTO) {
       const potBB = (bb && stack != null) ? readPot() / bb : null;
+      const bets = readBets();
       gto = window.PNHAGTO.decide({
         c1, c2, hand, position, board,
         toCallBB: toCallBBOf(action),
         potBB,
         stackBB,
+        myBetBB: bb ? bets.mine / bb : 0,
+        limpers: board.length === 0 ? countLimpers(bb) : 0,
+        villainAllIn: bets.allIn,
         tableSize: seats.length,
         street: board.length,
         aggroAuto: settings.gtoAggro === 'auto',
@@ -698,80 +947,122 @@
   let lastState = { hasCards: false, myTurn: false };
 
   const PANEL_CSS = `
-    #${OVERLAY_ID}{position:fixed;top:80px;right:16px;z-index:2147483647;width:212px;
-      font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-      background:#1e1f26;color:#e8e8ee;border-radius:12px;overflow:hidden;
-      box-shadow:0 8px 28px rgba(0,0,0,.5);border:1px solid #33353f;user-select:none;}
-    #${OVERLAY_ID}.pip{position:static;top:auto;right:auto;width:auto;border-radius:0;box-shadow:none;border:none;height:100%;}
-    #${OVERLAY_ID} .pnha-head{display:flex;align-items:center;gap:6px;padding:7px 10px;background:#282a36;
-      cursor:move;font-size:12px;font-weight:700;color:#7ee787;}
+    /* ── 패널 본체 ───────────────────────────────────────────────── */
+    #${OVERLAY_ID}{position:fixed;top:80px;right:16px;z-index:2147483647;width:236px;
+      font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Pretendard,Roboto,sans-serif;
+      background:linear-gradient(180deg,#242731 0%,#191a20 100%);color:#eceef5;
+      border-radius:14px;overflow:hidden;border:1px solid #363a4d;user-select:none;
+      box-shadow:0 12px 36px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.05);
+      -webkit-font-smoothing:antialiased;}
+    #${OVERLAY_ID}.pip{position:static;top:auto;right:auto;width:auto;border-radius:0;
+      box-shadow:none;border:none;height:100%;}
+    /* 프리미엄 핸드 / 내 차례 강조 */
+    #${OVERLAY_ID}.premium{border-color:#2ea043;box-shadow:0 0 0 2px rgba(46,160,67,.55),0 12px 36px rgba(0,0,0,.55);}
+    #${OVERLAY_ID}.my-turn{border-color:#f0a531;box-shadow:0 0 0 2px rgba(240,165,49,.45),0 12px 36px rgba(0,0,0,.55);}
+
+    /* ── 헤더 ─────────────────────────────────────────────────────── */
+    #${OVERLAY_ID} .pnha-head{display:flex;align-items:center;gap:6px;padding:8px 11px;
+      background:linear-gradient(180deg,#30344a 0%,#272a3a 100%);border-bottom:1px solid #363a4d;
+      cursor:move;font-size:11.5px;font-weight:800;letter-spacing:.2px;color:#8bf0a5;}
     #${OVERLAY_ID}.pip .pnha-head{cursor:default;}
-    #${OVERLAY_ID} .pnha-btn{cursor:pointer;color:#9aa0b4;font-size:14px;line-height:1;padding:0 3px;}
+    #${OVERLAY_ID} .pnha-btn{cursor:pointer;color:#8b90a8;font-size:13px;line-height:1;
+      padding:2px 4px;border-radius:6px;transition:background .12s,color .12s;}
+    #${OVERLAY_ID} .pnha-btn:hover{background:rgba(255,255,255,.09);color:#eceef5;}
     #${OVERLAY_ID} .pnha-pop{margin-left:auto;}
-    #${OVERLAY_ID} .pnha-body{padding:10px;text-align:center;}
-    #${OVERLAY_ID} .pnha-cards{font-size:30px;font-weight:800;letter-spacing:3px;line-height:1.1;min-height:34px;}
-    #${OVERLAY_ID} .pnha-cards.empty{font-size:14px;font-weight:600;color:#9aa0b4;letter-spacing:0;}
-    #${OVERLAY_ID} .pnha-red{color:#ff5c72;}
-    #${OVERLAY_ID} .pnha-code{font-size:14px;color:#9aa0b4;margin-top:2px;font-weight:700;}
-    #${OVERLAY_ID} .pnha-made{margin-top:5px;font-size:15px;font-weight:800;color:#e8e8ee;}
-    #${OVERLAY_ID} .pnha-made.made-strong{color:#7ee787;}
-    #${OVERLAY_ID} .pnha-made.made-mid{color:#f0d24b;}
-    #${OVERLAY_ID} .pnha-made.made-weak{color:#9aa0b4;}
-    #${OVERLAY_ID} .pnha-board{margin-top:4px;font-size:15px;font-weight:800;letter-spacing:1px;color:#e8e8ee;}
-    #${OVERLAY_ID}.premium{border-color:#2ea043;box-shadow:0 0 0 2px #2ea043,0 8px 28px rgba(0,0,0,.5);}
-    /* 메타 2칸: 내 포지션 / 지금 누구 차례 */
+    #${OVERLAY_ID} .pnha-body{padding:11px;text-align:center;}
+
+    /* ── 카드 (내 홀카드 · 보드) ─────────────────────────────────── */
+    #${OVERLAY_ID} .pnha-cards{display:flex;justify-content:center;gap:5px;min-height:38px;align-items:center;}
+    #${OVERLAY_ID} .pnha-cards.empty{display:block;font-size:13px;font-weight:700;color:#8b90a8;
+      letter-spacing:0;line-height:38px;}
+    #${OVERLAY_ID} .pnha-c{display:inline-block;min-width:30px;padding:4px 5px;border-radius:6px;
+      background:linear-gradient(180deg,#fdfdff,#e6e8f0);color:#14161c;
+      font-size:17px;font-weight:800;line-height:1.05;letter-spacing:0;
+      box-shadow:0 2px 5px rgba(0,0,0,.4);}
+    #${OVERLAY_ID} .pnha-c.pnha-red{color:#d81f3a;}
+    #${OVERLAY_ID} .pnha-board{margin-top:7px;display:flex;justify-content:center;gap:3px;}
+    #${OVERLAY_ID} .pnha-board .pnha-c{min-width:23px;padding:3px 4px;font-size:13px;
+      background:linear-gradient(180deg,#eef0f6,#d3d6e2);box-shadow:0 1px 3px rgba(0,0,0,.35);}
+    #${OVERLAY_ID} .pnha-code{font-size:13px;color:#8b90a8;margin-top:2px;font-weight:700;}
+
+    /* ── 완성 족보 ───────────────────────────────────────────────── */
+    #${OVERLAY_ID} .pnha-made{margin-top:7px;font-size:13px;font-weight:800;color:#eceef5;
+      background:#2a2d3b;border-radius:7px;padding:4px 6px;}
+    #${OVERLAY_ID} .pnha-made.made-strong{color:#8bf0a5;background:#16281d;}
+    #${OVERLAY_ID} .pnha-made.made-mid{color:#f0d24b;background:#2a2611;}
+    #${OVERLAY_ID} .pnha-made.made-weak{color:#8b90a8;}
+
+    /* ── 메타 2칸 / 스탯 3칸 ─────────────────────────────────────── */
     #${OVERLAY_ID} .pnha-meta{margin-top:8px;display:flex;gap:4px;}
     #${OVERLAY_ID} .pnha-meta .pnha-stat b{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
     #${OVERLAY_ID} .pnha-m-turn.mine b{color:#f0a531;}
-    /* 스탯 3칸: 내 스택 / 이번 핸드에 낸 돈 / 지금 더 내야 하는 돈 (전부 BB) */
-    #${OVERLAY_ID} .pnha-stats{margin-top:8px;display:flex;gap:4px;}
-    #${OVERLAY_ID} .pnha-stat{flex:1;background:#282a36;border-radius:7px;padding:4px 2px;line-height:1.15;}
-    #${OVERLAY_ID} .pnha-stat b{display:block;font-size:13px;font-weight:800;color:#e8e8ee;}
-    #${OVERLAY_ID} .pnha-stat i{display:block;font-size:9px;font-style:normal;font-weight:700;color:#9aa0b4;margin-top:1px;}
+    #${OVERLAY_ID} .pnha-stats{margin-top:5px;display:flex;gap:4px;}
+    #${OVERLAY_ID} .pnha-stat{flex:1;min-width:0;background:#282b38;border:1px solid #333748;
+      border-radius:8px;padding:5px 3px;line-height:1.15;}
+    #${OVERLAY_ID} .pnha-stat b{display:block;font-size:13px;font-weight:800;color:#eceef5;}
+    #${OVERLAY_ID} .pnha-stat i{display:block;font-size:9px;font-style:normal;font-weight:700;
+      color:#8b90a8;margin-top:2px;letter-spacing:.2px;}
+    #${OVERLAY_ID} .pnha-stat.hot{border-color:#7a5a17;background:#2c2716;}
     #${OVERLAY_ID} .pnha-stat.hot b{color:#f0a531;}
-    /* GTO 권장 줄 */
-    #${OVERLAY_ID} .pnha-gto{display:none;margin-top:6px;font-size:12px;font-weight:800;
-      border-radius:7px;padding:4px 6px;background:#12241a;color:#7ee787;}
-    #${OVERLAY_ID} .pnha-gto.fold{background:#2a1c1e;color:#ff5c72;}
-    #${OVERLAY_ID} .pnha-gto.check{background:#141f2e;color:#79b8ff;}
-    #${OVERLAY_ID} .pnha-gto.raise{background:#2a2410;color:#f0d24b;}
-    #${OVERLAY_ID} .pnha-gto.wait{background:#282a36;color:#9aa0b4;}
-    /* 내 차례 남은 시간 바 */
+
+    /* ── GTO 권장 카드: 액션 + 사이즈 + 근거 ─────────────────────── */
+    #${OVERLAY_ID} .pnha-gto{display:none;margin-top:8px;padding:6px 7px;border-radius:9px;
+      background:#16281d;border:1px solid #24503a;text-align:left;}
+    #${OVERLAY_ID} .pnha-gto .top{display:flex;align-items:center;gap:5px;}
+    #${OVERLAY_ID} .pnha-gto .tag{font-size:8.5px;font-weight:800;letter-spacing:.6px;color:#6f7590;}
+    #${OVERLAY_ID} .pnha-gto .act{font-size:14px;font-weight:900;letter-spacing:.2px;color:#8bf0a5;}
+    #${OVERLAY_ID} .pnha-gto .size{margin-left:auto;font-size:11.5px;font-weight:800;
+      background:rgba(255,255,255,.09);border-radius:6px;padding:2px 6px;color:#eceef5;}
+    #${OVERLAY_ID} .pnha-gto .why{display:block;margin-top:3px;font-size:10px;font-style:normal;
+      font-weight:700;color:#8b90a8;}
+    #${OVERLAY_ID} .pnha-gto.fold{background:#28191c;border-color:#5a2129;}
+    #${OVERLAY_ID} .pnha-gto.fold .act{color:#ff5c72;}
+    #${OVERLAY_ID} .pnha-gto.check{background:#141f2e;border-color:#1f3b5c;}
+    #${OVERLAY_ID} .pnha-gto.check .act{color:#79b8ff;}
+    #${OVERLAY_ID} .pnha-gto.call{background:#16281d;border-color:#24503a;}
+    #${OVERLAY_ID} .pnha-gto.raise{background:#2a2411;border-color:#6b5514;}
+    #${OVERLAY_ID} .pnha-gto.raise .act{color:#f0d24b;}
+    #${OVERLAY_ID} .pnha-gto.wait{background:#272a36;border-color:#3a3f52;}
+    #${OVERLAY_ID} .pnha-gto.wait .act{color:#aeb3c7;font-size:12px;}
+
+    /* ── 내 차례 남은 시간 ───────────────────────────────────────── */
     #${OVERLAY_ID} .pnha-turn{margin-top:8px;}
-    #${OVERLAY_ID} .pnha-bar{height:6px;border-radius:4px;background:#33353f;overflow:hidden;display:none;}
+    #${OVERLAY_ID} .pnha-bar{height:5px;border-radius:4px;background:#2f3341;overflow:hidden;display:none;}
     #${OVERLAY_ID}.my-turn .pnha-bar{display:block;}
     #${OVERLAY_ID} .pnha-bar i{display:block;height:100%;width:100%;background:#7ee787;border-radius:4px;
       transition:width .2s linear;}
     #${OVERLAY_ID} .pnha-bar.warn i{background:#f0d24b;}
     #${OVERLAY_ID} .pnha-bar.crit i{background:#ff5c72;}
-    #${OVERLAY_ID} .pnha-turntext{margin-top:3px;font-size:11px;font-weight:700;color:#9aa0b4;}
+    #${OVERLAY_ID} .pnha-turntext{margin-top:4px;font-size:10.5px;font-weight:700;color:#8b90a8;}
     #${OVERLAY_ID}.my-turn .pnha-turntext{color:#f0a531;}
-    /* 액션 버튼: 콜 · 체크 · 폴드 (콜/체크는 가능할 때만 보임) */
-    #${OVERLAY_ID} .pnha-actions{margin-top:8px;display:flex;gap:6px;}
-    #${OVERLAY_ID} .pnha-actions button{flex:1;padding:8px 4px;border:none;border-radius:8px;
-      color:#fff;font-weight:800;font-size:13px;line-height:1.15;cursor:pointer;}
+
+    /* ── 액션 버튼: 콜 · 체크 · 레이즈 · 폴드 ────────────────────── */
+    #${OVERLAY_ID} .pnha-actions{margin-top:9px;display:flex;flex-wrap:wrap;gap:5px;}
+    #${OVERLAY_ID} .pnha-actions button{flex:1 1 46%;min-width:0;padding:8px 4px;border:none;
+      border-radius:9px;color:#fff;font-weight:800;font-size:13px;line-height:1.15;cursor:pointer;
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.16);transition:filter .12s,transform .06s;}
+    #${OVERLAY_ID} .pnha-actions button:hover{filter:brightness(1.14);}
+    #${OVERLAY_ID} .pnha-actions button:active{transform:translateY(1px);}
+    #${OVERLAY_ID} .pnha-actions .bb{display:block;font-size:10px;font-weight:700;opacity:.85;margin-top:2px;}
     #${OVERLAY_ID} .pnha-fold{background:#b3242f;}
-    #${OVERLAY_ID} .pnha-fold:hover{background:#d0303c;}
     #${OVERLAY_ID} .pnha-fold.armed{background:#3a3d4d;color:#cfd2e0;box-shadow:none;}
-    #${OVERLAY_ID} .pnha-fold.armed:hover{background:#474a5c;}
     #${OVERLAY_ID} .pnha-call{background:#2ea043;display:none;}
-    #${OVERLAY_ID} .pnha-call:hover{background:#3fb854;}
     #${OVERLAY_ID} .pnha-check{background:#1f6feb;display:none;}
-    #${OVERLAY_ID} .pnha-check:hover{background:#388bfd;}
-    #${OVERLAY_ID} .pnha-call .bb{display:block;font-size:11px;font-weight:700;opacity:.85;margin-top:1px;}
+    #${OVERLAY_ID} .pnha-raise{background:linear-gradient(180deg,#c79a1f,#a17c14);display:none;}
     #${OVERLAY_ID}.collapsed .pnha-body{display:none;}
-    #${OVERLAY_ID} .pnha-foldmsg{font-size:10px;color:#9aa0b4;margin-top:5px;height:12px;}
-    /* 자동 폴드: 헤더 토글(🤖) + 실행 대기 줄 */
-    #${OVERLAY_ID} .pnha-auto-toggle{color:#5a5d70;margin-left:auto;}
+    #${OVERLAY_ID} .pnha-foldmsg{font-size:10px;color:#8b90a8;margin-top:6px;min-height:12px;}
+
+    /* ── 자동 실행 줄 ────────────────────────────────────────────── */
+    #${OVERLAY_ID} .pnha-auto-toggle{color:#5c6178;margin-left:auto;}
     #${OVERLAY_ID} .pnha-auto-toggle ~ .pnha-pop{margin-left:0;}
-    #${OVERLAY_ID}.auto-on .pnha-auto-toggle{color:#7ee787;}
-    #${OVERLAY_ID} .pnha-auto{display:none;margin-top:6px;align-items:center;gap:6px;
-      background:#3a2c12;border:1px solid #7a5a17;border-radius:7px;padding:4px 6px;}
+    #${OVERLAY_ID}.auto-on .pnha-auto-toggle{color:#8bf0a5;}
+    #${OVERLAY_ID} .pnha-auto{display:none;margin-top:7px;align-items:center;gap:6px;
+      background:#33280f;border:1px solid #7a5a17;border-radius:9px;padding:5px 6px;}
     #${OVERLAY_ID} .pnha-auto.on{display:flex;}
-    #${OVERLAY_ID} .pnha-auto span{flex:1;text-align:left;font-size:11px;font-weight:800;color:#f0a531;}
-    #${OVERLAY_ID} .pnha-auto button{border:none;border-radius:6px;background:#5a5d70;color:#fff;
-      font-size:11px;font-weight:800;padding:3px 8px;cursor:pointer;}
-    #${OVERLAY_ID} .pnha-auto button:hover{background:#6d7189;}
+    #${OVERLAY_ID} .pnha-auto span{flex:1;text-align:left;font-size:10.5px;font-weight:800;color:#f0a531;}
+    #${OVERLAY_ID} .pnha-auto button{border:none;border-radius:7px;background:#4d5165;color:#fff;
+      font-size:10.5px;font-weight:800;padding:3px 8px;cursor:pointer;}
+    #${OVERLAY_ID} .pnha-auto button:hover{background:#616579;}
   `;
 
   // 지정한 document 에 패널을 만들고 이벤트를 연결한다.
@@ -814,6 +1105,7 @@
         <div class="pnha-actions">
           <button class="pnha-call" type="button">콜</button>
           <button class="pnha-check" type="button">체크</button>
+          <button class="pnha-raise" type="button">레이즈</button>
           <button class="pnha-fold" type="button">폴드</button>
         </div>
         <div class="pnha-auto"><span></span><button type="button">취소</button></div>
@@ -825,6 +1117,7 @@
     const els = {
       box, cards: q('.pnha-cards'), made: q('.pnha-made'), board: q('.pnha-board'),
       call: q('.pnha-call'), check: q('.pnha-check'), fold: q('.pnha-fold'),
+      raise: q('.pnha-raise'),
       bar: q('.pnha-bar'), barFill: q('.pnha-bar i'), turntext: q('.pnha-turntext'),
       mPos: q('.pnha-m-pos b'), mTurn: q('.pnha-m-turn b'), mTurnBox: q('.pnha-m-turn'),
       sStack: q('.pnha-s-stack b'), sPaid: q('.pnha-s-paid b'),
@@ -859,6 +1152,18 @@
       if (!lastState.myTurn) { flash(els, '내 차례 아님'); return; }
       flash(els, clickFound('check') ? '✓ 체크' : '체크 버튼 없음');
       detectMyHand();
+    });
+
+    // 레이즈: GTO 가 권장한 금액(없으면 최소 레이즈)을 넣고 확인까지 눌러준다
+    els.raise.addEventListener('click', () => {
+      if (!lastState.myTurn) { flash(els, '내 차례 아님'); return; }
+      const bb = getBigBlind();
+      const target = raiseTargetChips(lastState.gto);
+      flash(els, '레이즈 ' + (bb ? fmtBB(target / bb) + 'BB' : target) + ' …');
+      performRaise(target, (ok, why) => {
+        flash(els, ok ? '✓ 레이즈' : '레이즈 실패: ' + why);
+        detectMyHand();
+      });
     });
 
     els.fold.addEventListener('click', () => {
@@ -913,8 +1218,10 @@
     }
   }
 
+  const esc = (t) => String(t).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+
   const colorCard = (p) =>
-    '<span class="' + ((p.includes('♥') || p.includes('♦')) ? 'pnha-red' : '') + '">' + p + '</span>';
+    '<span class="pnha-c' + ((p.includes('♥') || p.includes('♦')) ? ' pnha-red' : '') + '">' + p + '</span>';
 
   function flash(els, text) {
     els.foldmsg.textContent = text;
@@ -935,7 +1242,7 @@
       box.classList.remove('premium');
     } else {
       cards.className = 'pnha-cards';
-      cards.innerHTML = colorCard(state.pretty1) + ' ' + colorCard(state.pretty2);
+      cards.innerHTML = colorCard(state.pretty1) + colorCard(state.pretty2);
       box.classList.toggle('premium', !!state.allowed);
 
       // 족보 줄: 플롭 이후에만 완성 족보 표시 (프리플롭 핸드코드는 카드로 충분해서 숨김)
@@ -951,15 +1258,15 @@
 
       // 보드 카드
       if (state.boardPretty && state.boardPretty.length) {
-        board.style.display = 'block';
-        board.innerHTML = state.boardPretty.map(colorCard).join(' ');
+        board.style.display = 'flex';
+        board.innerHTML = state.boardPretty.map(colorCard).join('');
       } else {
         board.style.display = 'none';
       }
     }
 
     box.classList.toggle('my-turn', !!state.myTurn);
-    box.classList.toggle('auto-on', !!settings.autoFold);
+    box.classList.toggle('auto-on', !!(settings.autoFold || settings.gtoMode));
     paintAuto();
 
     // 내 포지션 / 지금 누구 차례
@@ -977,20 +1284,28 @@
     overlayEls.sToCall.textContent = state.myTurn ? bbText(toCallBB) : '—';
     overlayEls.sToCallBox.classList.toggle('hot', !!toCallBB);
 
-    // GTO 권장 표시 (내 차례가 아니어도 항상 보여준다)
+    // GTO 권장 카드 (내 차례가 아니어도 항상 보여준다)
+    //   [GTO] 레이즈            7.5 BB
+    //   3벳 · 에퀴티 46% vs 25%
     const gtoEl = overlayEls.gto;
-    if (settings.gtoMode && state.gto && state.gto.action) {
+    const g = state.gto;
+    if (settings.gtoMode && g && g.action) {
       gtoEl.style.display = 'block';
-      gtoEl.className = 'pnha-gto ' + state.gto.action;
-      const actLabel = { fold: '폴드', call: '콜', check: '체크', raise: '레이즈' }[state.gto.action] || '';
-      if (state.gto.action === 'wait') {
-        gtoEl.textContent = 'GTO: ' + (state.gto.reason || '직접 실행');
-      } else {
-        const eq = state.gto.equity != null ? Math.round(state.gto.equity * 100) + '%' : '';
-        const req = state.gto.required != null ? Math.round(state.gto.required * 100) + '%' : '';
-        gtoEl.textContent = 'GTO: ' + actLabel + (eq ? '  (' + eq + ' vs ' + req + ')' : '');
-      }
-      gtoEl.title = state.gto.reason || '';
+      gtoEl.className = 'pnha-gto ' + g.action;
+      const actLabel = g.action === 'wait'
+        ? (g.reason || '직접 실행')
+        : ({ fold: '폴드', call: '콜', check: '체크', raise: '레이즈' }[g.action] || g.action);
+      const size = g.sizeBB != null ? '<span class="size">' + fmtBB(g.sizeBB) + ' BB</span>' : '';
+      const eq = g.equity != null ? Math.round(g.equity * 100) + '%' : '';
+      const req = g.required != null ? Math.round(g.required * 100) + '%' : '';
+      const why = [
+        g.action === 'wait' ? '' : (g.reason || ''),
+        eq ? '에퀴티 ' + eq + (req ? ' vs ' + req : '') : ''
+      ].filter(Boolean).join(' · ');
+      gtoEl.innerHTML =
+        '<div class="top"><span class="tag">GTO</span><span class="act">' + esc(actLabel) + '</span>' + size + '</div>' +
+        (why ? '<i class="why">' + esc(why) + '</i>' : '');
+      gtoEl.title = g.reason || '';
     } else {
       gtoEl.style.display = 'none';
     }
@@ -1014,6 +1329,16 @@
     }
     call.style.display = showCall ? 'block' : 'none';
     check.style.display = showCheck ? 'block' : 'none';
+
+    // 레이즈 버튼: 내 차례고 페이지에 레이즈/벳 버튼이 살아 있을 때만.
+    // GTO 가 사이즈를 냈으면 그 금액을 버튼에 적어준다.
+    const raiseBtn = overlayEls.raise;
+    const canRaise = state.myTurn && !!findRaiseButton();
+    raiseBtn.style.display = canRaise ? 'block' : 'none';
+    if (canRaise) {
+      const sz = state.gto && state.gto.sizeBB != null ? fmtBB(state.gto.sizeBB) + ' BB' : '직접';
+      raiseBtn.innerHTML = '레이즈<span class="bb">' + sz + '</span>';
+    }
     call.innerHTML = '콜<span class="bb">+' +
       (a && a.toCallBB != null ? fmtBB(a.toCallBB) + ' BB' : '?') + '</span>';
 
@@ -1327,7 +1652,9 @@
   }
 
   function maybeAutoAct(ctx) {
-    if (!settings.autoFold) { cancelAutoAct(); return; }
+    // GTO 모드는 그 자체가 "내 차례에 알아서 누른다" 는 뜻이라 자동 폴드와 별개로 동작한다.
+    // (예전엔 자동 폴드까지 같이 켜야만 GTO 가 눌렀다 — 켠 줄 알았는데 아무것도 안 하는 원인)
+    if (!settings.autoFold && !settings.gtoMode) { cancelAutoAct(); return; }
     if (settings.gtoMode) { maybeAutoGto(ctx); return; }  // GTO 경로
     if (ctx.allowed) { cancelAutoAct(); return; }                    // 지정 핸드 → 내가 직접
     if (settings.autoPreflopOnly && ctx.boardLen >= 3) { cancelAutoAct(); return; }
@@ -1431,11 +1758,15 @@
       const position = heroPositionName(seats);
       const action = getActionInfo(stack);
       const potBB = bb ? readPot() / bb : null;
+      const bets = readBets();
       return window.PNHAGTO.decide({
         c1, c2, hand, position, board,
         toCallBB: toCallBBOf(action),
         potBB,
         stackBB: (stack != null && bb) ? stack / bb : null,
+        myBetBB: bb ? bets.mine / bb : 0,
+        limpers: board.length === 0 ? countLimpers(bb) : 0,
+        villainAllIn: bets.allIn,
         tableSize: seats.length,
         street: board.length,
         aggroAuto: settings.gtoAggro === 'auto',
@@ -1449,7 +1780,7 @@
     autoAct.key = null; autoAct.dueAt = 0; autoAct.plan = null;
 
     // 실행 직전에 조건을 처음부터 다시 확인한다 (기다리는 사이 상황이 바뀔 수 있다)
-    if (!settings.enabled || !settings.autoFold) return;
+    if (!settings.enabled || (!settings.autoFold && !settings.gtoMode)) return;
     if (autoAct.cancelKey === lastRawKey) return;
     if (!isMyTurn() || isHeroFolded()) return;
 
@@ -1460,12 +1791,12 @@
     const hand = normalizeHand(c1, c2);
     if (!hand) return;
 
-    let action = null, reason = '', equity = null, required = null;
+    let action = null, reason = '', dec = null;
     if (settings.gtoMode) {
       // GTO: 실행 시점에 다시 판단한다
-      const dec = computeGtoNow();
+      dec = computeGtoNow();
       if (!dec) return;
-      action = dec.action; reason = dec.reason || ''; equity = dec.equity; required = dec.required;
+      action = dec.action; reason = dec.reason || '';
       if (action === 'wait' || (action === 'raise' && settings.gtoAggro !== 'auto')) {
         setAutoMsg('🤖 GTO: 레이즈 권장 · 직접 누르세요', 2500);
         return;
@@ -1476,14 +1807,28 @@
       action = (settings.autoCheckFree && toCall === 0) ? 'check' : 'fold';
     }
 
+    // 레이즈는 "금액 입력 → 확인 클릭" 두 단계라 시간이 걸린다 (콜백으로 마무리)
+    if (action === 'raise') {
+      const bb = getBigBlind();
+      const target = raiseTargetChips(dec);
+      const toBB = bb ? fmtBB(target / bb) + 'BB' : String(target);
+      autoAct.doneKey = sk;                       // 한 스트리트에 두 번 올리지 않는다
+      setAutoMsg('🤖 레이즈 ' + toBB + ' …', 4000);
+      log('자동 레이즈 시도:', hand, reason, target + '칩 (' + toBB + ')');
+      performRaise(target, (ok2, why) => {
+        setAutoMsg(ok2 ? '🤖 자동 레이즈함 · ' + toBB : '🤖 레이즈 실패: ' + why, 3000);
+        detectMyHand();
+      });
+      return;
+    }
+
     let ok = false;
     if (action === 'check') ok = clickFound('check');
     else if (action === 'call') ok = clickFound('call');
-    else if (action === 'raise') ok = clickRaiseButton();
     else ok = clickFoldButton();
 
     autoAct.doneKey = sk;
-    const label = { fold: '폴드', call: '콜', check: '체크', raise: '레이즈' }[action] || '액션';
+    const label = { fold: '폴드', call: '콜', check: '체크' }[action] || '액션';
     setAutoMsg(ok ? '🤖 자동 ' + label + '함' : '🤖 버튼을 못 찾음');
     log('자동 액션:', action, ok ? '성공' : '실패', hand, reason);
     detectMyHand();
