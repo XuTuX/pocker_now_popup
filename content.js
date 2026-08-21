@@ -19,9 +19,11 @@
   'use strict';
 
   // 카드 파싱 · 족보 계산은 poker.js 에 있다 (여기서는 이름만 꺼내 쓴다).
+  if (!window.PNHACards) console.error('[PokerAlert] content.js: window.PNHACards 없음 — poker.js 로드 실패?');
+  const P = window.PNHACards || {};
   const {
     looksLikeCard, parseCardElement, normalizeHand, prettyCard, parseCardList, describeMade
-  } = window.PNHACards;
+  } = P;
 
   /* ===== 설정: DEBUG & 셀렉터 (감지가 안 되면 여기만 고치면 됨) ============ */
 

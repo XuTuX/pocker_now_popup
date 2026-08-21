@@ -15,9 +15,14 @@
 (() => {
   'use strict';
 
+  // poker.js 가 먼저 로드되어 window.PNHACards 를 만든다.
+  // 만약 실패해도 이 파일이 로드 시점에 throw 하지 않도록 방어한다.
+  // (content script 중간 파일이 죽으면 뒤따르는 content.js 주입이 중단될 수 있다)
+  const P = window.PNHACards || {};
   const {
     expandHandRange, equityVsRange, RANK_NUM, NUM_RANK
-  } = window.PNHACards;
+  } = P;
+  if (!window.PNHACards) console.error('[PokerAlert] gto.js: window.PNHACards 없음 — poker.js 로드 실패?');
 
   /* ===== 인원수 티어별 프리플롭 레인지 (100BB, 노 앤티 근사) =============
    * 표기: "A2s+" = A2s..AKs / "TT+" = TT..AA / 콤마로 구분.
@@ -264,4 +269,3 @@
 
   window.PNHAGTO = { decide, buildRange, inRange, normalizePosition, tierFor };
 })();
-
