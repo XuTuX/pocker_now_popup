@@ -30,7 +30,68 @@
   <!-- 수동 Fold: 다른 탭에 있어도 여기서 폴드 -->
   <section class="fold-section">
     <button id="foldBtn" class="fold-btn">✋ Fold 하기</button>
-    <div id="foldMsg" class="fold-msg">버튼 · <b>F</b> 키 · 오버레이 버튼 (자동 아님)</div>
+    <div id="foldMsg" class="fold-msg">버튼 · <b>F</b> 키 · 오버레이 버튼</div>
+  </section>
+
+  <!-- 자동 폴드: 아래에서 체크한 핸드가 아니면 내 차례에 알아서 폴드 -->
+  <section id="autoSection" class="auto-section">
+    <div class="row">
+      <span class="label">🤖 자동 폴드 <small>(지정 핸드 외)</small></span>
+      <label class="switch small">
+        <input type="checkbox" id="autoFold" />
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div class="auto-opts">
+      <div class="row sub">
+        <span class="label">방식</span>
+        <select id="autoMode">
+          <option value="prefold">미리 폴드 예약 (바로)</option>
+          <option value="turn">내 차례에 N초 뒤</option>
+        </select>
+      </div>
+      <div class="row sub">
+        <span class="label">N초 (예약 실패 시에도)</span>
+        <select id="autoFoldDelay">
+          <option value="0">즉시</option>
+          <option value="1">1초</option>
+          <option value="2">2초</option>
+          <option value="3">3초</option>
+          <option value="5">5초</option>
+        </select>
+      </div>
+      <label class="chk"><input type="checkbox" id="autoCheckFree" /><span>더 낼 돈 0 BB 면 폴드 대신 <b>체크</b></span></label>
+      <label class="chk"><input type="checkbox" id="autoPreflopOnly" /><span>프리플롭에서만 (플롭 이후는 직접)</span></label>
+    </div>
+    <div id="autoWarn" class="auto-warn">지정 핸드가 아니면 카드를 받자마자 PokerNow 의 <b>미리 폴드</b>를 눌러둡니다. 내 차례가 오면 폴드되고, 그 전에 오버레이의 <b>취소</b>를 누르면 취소됩니다.</div>
+  </section>
+
+  <!-- GTO 자동 콜/폴드: autoFold 위에서 동작 (켜면 프리미엄 목록 대신 GTO 차트 사용) -->
+  <section id="gtoSection" class="auto-section">
+    <div class="row">
+      <span class="label">🧠 GTO 자동 콜/폴드</span>
+      <label class="switch small">
+        <input type="checkbox" id="gtoMode" />
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div class="auto-opts">
+      <div class="row sub">
+        <span class="label">범위</span>
+        <select id="gtoStreet">
+          <option value="preflop">프리플롭만</option>
+          <option value="all">전체 (에퀴티 근사)</option>
+        </select>
+      </div>
+      <div class="row sub">
+        <span class="label">레이즈</span>
+        <select id="gtoAggro">
+          <option value="manual">직접 (권장만 표시)</option>
+          <option value="auto">자동으로 누르기</option>
+        </select>
+      </div>
+      <div class="auto-warn">GTO 모드는 내 차례에 N초 뒤 자동으로 콜/체크/폴드를 실행합니다. 차트는 <b>테이블 인원수(2~9명)에 맞춰 자동 전환</b>되는 100BB 근사치이며 <b>gto.js</b> 에서 수정할 수 있습니다.</div>
+    </div>
   </section>
 
   <!-- 프리미엄 핸드 체크박스 -->
@@ -49,12 +110,12 @@
   </section>
 
   <div class="actions">
-    <button id="saveBtn" class="save-btn">Save</button>
     <a href="#" id="openOptions" class="options-link">More settings (13×13 matrix) →</a>
   </div>
 
   <div id="savedMsg" class="saved-msg"></div>
 
+  <script src="defaults.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

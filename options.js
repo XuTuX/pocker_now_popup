@@ -6,25 +6,18 @@
  *   - 대각선     → 페어 (AA, KK, ...)
  *   - 대각선 위  → 수딧 (예: 행 A, 열 K → AKs)   [높은 랭크가 앞]
  *   - 대각선 아래→ 오프수딧 (예: 행 K, 열 A → AKo)
+ *
+ * ※ 기본값·랭크 목록은 defaults.js(PNHA) 한 곳에서만 정의한다.
  */
 
-const RANKS = ['A', 'K', 'Q', 'J', 'T', '9', '8', '7', '6', '5', '4', '3', '2'];
-
-const PREMIUM_DEFAULT = ['AA', 'KK', 'QQ', 'JJ', 'AKs', 'AKo'];
-
-const DEFAULT_SETTINGS = {
-  enabled: true,
-  soundEnabled: true,
-  hands: [...PREMIUM_DEFAULT]
-};
+const RANKS = [...PNHA.RANKS_LOW_FIRST].reverse();   // A 부터 2 까지
 
 const el = (id) => document.getElementById(id);
 
-let selected = new Set();          // 현재 선택된 핸드 문자열들
-let otherSettings = { ...DEFAULT_SETTINGS }; // enabled/sound/notif 등 유지용
+let selected = new Set();   // 현재 선택된 핸드 문자열들
 
 /* 셀(행 i, 열 j)이 나타내는 핸드 문자열 계산 */
-function handForClean(i, j) {
+function handForCell(i, j) {
   const r1 = RANKS[i];
   const r2 = RANKS[j];
   if (i === j) return r1 + r2;                 // 페어
@@ -55,7 +48,7 @@ function buildMatrix() {
     tr.appendChild(th);
 
     RANKS.forEach((colRank, j) => {
-      const hand = handForClean(i, j);
+      const hand = handForCell(i, j);
       const td = document.createElement('td');
       td.textContent = hand;
       td.dataset.hand = hand;
@@ -87,29 +80,44 @@ function refreshSelection() {
 /* 불러오기 */
 function load() {
   chrome.storage.local.get('settings', (data) => {
-    otherSettings = Object.assign({ ...DEFAULT_SETTINGS }, data.settings || {});
-    selected = new Set(otherSettings.hands || []);
+    selected = new Set(PNHA.merge(data.settings).hands);
     buildMatrix();
     refreshSelection();
+    const s = PNHA.merge(data.settings);
+    el('gtoMode').checked = !!s.gtoMode;
+    el('gtoStreetAll').checked = s.gtoStreet === 'all';
+    el('gtoAggroAuto').checked = s.gtoAggro === 'auto';
   });
 }
 
-/* 저장 */
+/* 저장 — 저장 직전에 최신 설정을 다시 읽어 hands 만 갈아끼운다.
+ * (팝업을 같이 열어놓고 만졌을 때 옛 스냅샷으로 덮어쓰지 않도록) */
 function save() {
-  const settings = Object.assign({ ...otherSettings }, {
-    hands: Array.from(selected)
-  });
-  chrome.storage.local.set({ settings }, () => {
-    otherSettings = settings;
-    const msg = el('savedMsg');
-    msg.textContent = '✓ 저장되었습니다';
-    setTimeout(() => (msg.textContent = ''), 1600);
+  chrome.storage.local.get('settings', (data) => {
+    const settings = Object.assign(PNHA.merge(data.settings), {
+      hands: Array.from(selected),
+      gtoMode: el('gtoMode').checked,
+      gtoStreet: el('gtoStreetAll').checked ? 'all' : 'preflop',
+      gtoAggro: el('gtoAggroAuto').checked ? 'auto' : 'manual'
+    });
+    chrome.storage.local.set({ settings }, () => {
+      const msg = el('savedMsg');
+      msg.textContent = '✓ 저장되었습니다';
+      setTimeout(() => (msg.textContent = ''), 1600);
+    });
   });
 }
+
+/* 다른 화면(팝업·오버레이)에서 핸드 목록이 바뀌면 따라간다 */
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local' || !changes.settings) return;
+  selected = new Set(PNHA.merge(changes.settings.newValue).hands);
+  refreshSelection();
+});
 
 /* 툴바 버튼 */
 el('selectPremium').addEventListener('click', () => {
-  selected = new Set(PREMIUM_DEFAULT);
+  selected = new Set(PNHA.PREMIUM_DEFAULT);
   refreshSelection();
 });
 el('selectAll').addEventListener('click', () => {

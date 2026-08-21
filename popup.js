@@ -3,7 +3,9 @@
  *   - 저장된 설정 불러와서 화면에 반영
  *   - 자주 쓰는 프리미엄 핸드 목록을 체크박스로 표시
  *   - 현재 감지된 핸드 표시
- *   - Save 버튼으로 chrome.storage.local 에 저장
+ *   - 바꾸는 즉시 chrome.storage.local 에 저장 (Save 버튼 없음)
+ *
+ * ※ 기본값은 defaults.js(PNHA) 한 곳에서만 정의한다.
  */
 
 // 팝업에 표시할 "빠른 선택용" 핸드 (자주 쓰는 프리미엄 위주).
@@ -14,20 +16,14 @@ const QUICK_HANDS = [
   'KQs', 'KQo', 'JTs', 'ATs'
 ];
 
-const DEFAULT_SETTINGS = {
-  enabled: true,
-  soundEnabled: true,
-  hands: ['AA', 'KK', 'QQ', 'JJ', 'AKs', 'AKo']
-};
-
 const el = (id) => document.getElementById(id);
 
-let settings = { ...DEFAULT_SETTINGS };
+let settings = PNHA.defaults();
 
 /* 설정 불러오기 */
 function load() {
   chrome.storage.local.get(['settings', 'currentHand'], (data) => {
-    settings = Object.assign({ ...DEFAULT_SETTINGS }, data.settings || {});
+    settings = PNHA.merge(data.settings);
     render();
     renderCurrentHand(data.currentHand);
   });
@@ -37,8 +33,8 @@ function load() {
 function render() {
   el('enabled').checked = settings.enabled;
   el('soundEnabled').checked = settings.soundEnabled;
-  el('statusText').textContent = settings.enabled ? 'ON' : 'OFF';
-  el('statusText').style.color = settings.enabled ? '#7ee787' : '#f85149';
+  renderStatusText();
+  renderAuto();
 
   // 팝업 목록에는 QUICK_HANDS + 이미 선택된(설정에 있는) 핸드를 합쳐서 보여줌
   const shown = Array.from(new Set([...QUICK_HANDS, ...settings.hands]));
@@ -50,11 +46,66 @@ function render() {
     cb.type = 'checkbox';
     cb.value = hand;
     cb.checked = settings.hands.includes(hand);
+    cb.addEventListener('change', saveNow);   // 체크하는 즉시 저장
     const span = document.createElement('span');
     span.textContent = hand;
     label.appendChild(cb);
     label.appendChild(span);
     list.appendChild(label);
+  });
+}
+
+function renderStatusText() {
+  const on = settings.enabled;
+  el('statusText').textContent = on ? 'ON' : 'OFF';
+  el('statusText').classList.toggle('off', !on);
+}
+
+/* 자동 폴드 설정: 화면 반영 */
+function renderAuto() {
+  el('autoFold').checked = !!settings.autoFold;
+  el('autoMode').value = settings.autoMode === 'turn' ? 'turn' : 'prefold';
+  el('autoFoldDelay').value = String(settings.autoFoldDelay != null ? settings.autoFoldDelay : 1);
+  el('autoCheckFree').checked = !!settings.autoCheckFree;
+  el('autoPreflopOnly').checked = !!settings.autoPreflopOnly;
+  el('autoSection').classList.toggle('on', !!settings.autoFold);
+  el('gtoMode').checked = !!settings.gtoMode;
+  el('gtoStreet').value = settings.gtoStreet === 'all' ? 'all' : 'preflop';
+  el('gtoAggro').value = settings.gtoAggro === 'auto' ? 'auto' : 'manual';
+  el('gtoSection').classList.toggle('on', !!settings.gtoMode);
+}
+
+/* 화면에 있는 값을 전부 읽는다 */
+function readForm() {
+  return {
+    enabled: el('enabled').checked,
+    soundEnabled: el('soundEnabled').checked,
+    hands: Array.from(document.querySelectorAll('#handList input:checked')).map((cb) => cb.value),
+    autoFold: el('autoFold').checked,
+    autoMode: el('autoMode').value,
+    autoFoldDelay: parseFloat(el('autoFoldDelay').value) || 0,
+    autoCheckFree: el('autoCheckFree').checked,
+    autoPreflopOnly: el('autoPreflopOnly').checked,
+    gtoMode: el('gtoMode').checked,
+    gtoStreet: el('gtoStreet').value,
+    gtoAggro: el('gtoAggro').value
+  };
+}
+
+/* 어떤 항목이든 바꾸면 바로 저장한다.
+ * (예전엔 자동 폴드만 즉시 저장이고 ON/OFF·핸드는 Save 를 눌러야 했다.
+ *  그래서 스위치만 만지고 팝업을 닫으면 화면과 실제 설정이 달라졌다.) */
+function saveNow() {
+  const form = readForm();
+  if (form.gtoMode) form.autoFold = true;   // GTO 모드는 자동 폴드 스위치 위에서 동작
+  settings = Object.assign({}, settings, form);
+  chrome.storage.local.set({ settings }, () => {
+    renderStatusText();
+    renderAuto();
+    const msg = el('savedMsg');
+    msg.textContent = '✓ 저장됨';
+    clearTimeout(saveNow._t);
+    saveNow._t = setTimeout(() => (msg.textContent = ''), 1200);
   });
 }
 
@@ -79,35 +130,22 @@ function renderCurrentHand(current) {
 
 // 팝업이 열려있는 동안 실시간 갱신 (content.js 가 storage 를 업데이트하면 반영)
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'local' && changes.currentHand) {
-    renderCurrentHand(changes.currentHand.newValue);
+  if (area !== 'local') return;
+  if (changes.currentHand) renderCurrentHand(changes.currentHand.newValue);
+  // 오버레이의 🤖 버튼으로 켜고 끈 것도 팝업에 반영
+  if (changes.settings) {
+    settings = PNHA.merge(changes.settings.newValue);
+    renderStatusText();
+    renderAuto();
   }
 });
 
-/* 저장 */
-function save() {
-  const checked = Array.from(document.querySelectorAll('#handList input:checked'))
-    .map((cb) => cb.value);
+/* 이벤트 연결: 모든 입력이 같은 저장 경로를 쓴다 */
+['enabled', 'soundEnabled', 'autoFold', 'autoMode', 'autoFoldDelay', 'autoCheckFree', 'autoPreflopOnly']
+  .forEach((id) => el(id).addEventListener('change', saveNow));
+['gtoMode', 'gtoStreet', 'gtoAggro']
+  .forEach((id) => el(id).addEventListener('change', saveNow));
 
-  settings = {
-    enabled: el('enabled').checked,
-    soundEnabled: el('soundEnabled').checked,
-    hands: checked
-  };
-
-  chrome.storage.local.set({ settings }, () => {
-    const msg = el('savedMsg');
-    msg.textContent = '✓ Saved';
-    setTimeout(() => (msg.textContent = ''), 1500);
-  });
-}
-
-/* 이벤트 연결 */
-el('enabled').addEventListener('change', () => {
-  el('statusText').textContent = el('enabled').checked ? 'ON' : 'OFF';
-  el('statusText').style.color = el('enabled').checked ? '#7ee787' : '#f85149';
-});
-el('saveBtn').addEventListener('click', save);
 el('openOptions').addEventListener('click', (e) => {
   e.preventDefault();
   chrome.runtime.openOptionsPage();
@@ -116,14 +154,7 @@ el('openOptions').addEventListener('click', (e) => {
 // 열려있는 PokerNow 탭을 찾는다 (활성 탭이 아니어도 됨).
 // host_permissions(pokernow.club) 덕분에 URL 패턴으로 탭을 조회할 수 있다.
 function findPokerNowTab(callback) {
-  chrome.tabs.query({
-    url: [
-      '*://*.pokernow.club/*',
-      '*://pokernow.club/*',
-      '*://*.pokernow.com/*',
-      '*://pokernow.com/*'
-    ]
-  }, (tabs) => {
+  chrome.tabs.query({ url: 'https://*.pokernow.club/*' }, (tabs) => {
     callback(tabs && tabs.length ? tabs[0] : null);
   });
 }
@@ -139,7 +170,8 @@ function requestFreshDetect() {
 }
 
 /* 수동 Fold: 사용자가 버튼을 눌렀을 때만 PokerNow 탭의 Fold 버튼을 클릭시킨다.
- * (익스텐션이 스스로 판단해서 폴드하지 않는다 — 항상 사용자가 클릭.) */
+ * (익스텐션이 스스로 판단해서 폴드하지 않는다 — 항상 사용자가 클릭.)
+ * 내 차례가 아니면 PokerNow 의 "미리 폴드" 예약 ↔ 취소 토글이 된다. */
 function setFoldMsg(text, cls) {
   const m = el('foldMsg');
   m.textContent = text;
@@ -164,8 +196,10 @@ el('foldBtn').addEventListener('click', () => {
         return;
       }
       if (resp && resp.ok) {
-        setFoldMsg('✓ 폴드했습니다.', 'ok');
-        setTimeout(() => setFoldMsg('이 버튼을 누를 때만 폴드합니다 (자동 아님)', ''), 1800);
+        // 내 차례면 즉시 폴드, 아니면 예약/취소 토글
+        setFoldMsg(resp.myTurn ? '✓ 폴드했습니다.'
+          : (resp.armed ? '✓ 미리 폴드를 예약했습니다.' : '✓ 예약을 취소했습니다.'), 'ok');
+        setTimeout(() => setFoldMsg('버튼 · F 키 · 오버레이 버튼', ''), 2000);
       } else {
         setFoldMsg('Fold 버튼을 못 찾음 (내 차례가 아니거나 셀렉터 수정 필요).', 'err');
       }

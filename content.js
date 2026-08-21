@@ -8,27 +8,38 @@
  *      (⧉ 버튼으로 다른 창 위에 뜨는 PiP 창으로 뺄 수 있음)
  *   3) 프리미엄 핸드면 알림음을 낸다.
  *
- * ⚠️ 게임 버튼을 "자동으로" 누르는 기능은 없다. 폴드는 사용자가 오버레이
- *    버튼 / F 키 / 팝업 버튼을 직접 눌렀을 때만 실행된다.
+ * ⚠️ 자동 폴드는 "기본 꺼짐" 이며, 설정에서 켰을 때만 동작한다.
+ *    켜면 지정한 핸드가 아닐 때 PokerNow 의 "미리 폴드(사전 액션)" 를 대신
+ *    눌러둔다. 내가 취소하지 않으면 내 차례가 왔을 때 PokerNow 가 폴드한다.
+ *    (취소: 오버레이의 취소 버튼 / 폴드 예약 버튼 토글 / 팝업 스위치 끄기)
+ *    꺼져 있으면 폴드는 오버레이 버튼 / F 키 / 팝업 버튼으로만 실행된다.
  * ========================================================================= */
 
 (() => {
   'use strict';
 
+  // 카드 파싱 · 족보 계산은 poker.js 에 있다 (여기서는 이름만 꺼내 쓴다).
+  const {
+    looksLikeCard, parseCardElement, normalizeHand, prettyCard, parseCardList, describeMade
+  } = window.PNHACards;
+
   /* ===== 설정: DEBUG & 셀렉터 (감지가 안 되면 여기만 고치면 됨) ============ */
 
-  const DEBUG = true;
+  // 평소엔 조용히. 콘솔에서 localStorage['pnha-debug']='1' 후 새로고침하면 로그가 켜진다.
+  const DEBUG = (() => { try { return localStorage.getItem('pnha-debug') === '1'; } catch (e) { return false; } })();
   const log = (...a) => { if (DEBUG) console.log('[PokerAlert]', ...a); };
 
   // 내 자리(hero) 컨테이너 후보
-  const HERO_CONTAINER_SELECTORS = ['.table-player.you-player', '.you-player', '.hero-player'];
+  const HERO_CONTAINER_SELECTORS = ['.table-player.you-player', '.you-player', '.hero-player', '[class*="you-player"]'];
 
   // 카드 요소 후보 (PokerNow: .table-player-cards > .card-container > ... > .card)
   const CARD_SELECTORS = [
     '.table-player-cards .card-container',
     '.table-player-cards .card',
     '.card-container',
-    '.card'
+    '.card',
+    '.playing-card',
+    '[class*="card-s-"]'
   ];
 
   // Fold 버튼 후보
@@ -64,15 +75,29 @@
   const THROTTLE_MS = 600;   // 변경 폭주 시에도 이 간격으로는 반드시 검사
   const HEARTBEAT_MS = 1200; // 변경이 없어도 주기적으로 검사
 
-  const RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K', 'A'];
-  const RANK_ORDER = Object.fromEntries(RANKS.map((r, i) => [r, i]));
 
   /* ===== 상태 & 설정 ====================================================== */
 
-  let settings = defaultSettings();
+  let settings = PNHA.defaults();
   let lastRawKey = null;     // 마지막 감지 카드 키 (새 핸드 판별)
   let preFoldArmed = false;  // 내가 "미리 폴드"를 예약했는지 (취소 가능)
+  // 자동 폴드 상태.
+  //   key       : 지금 예약된 스트리트 키 (핸드+보드장수)
+  //   doneKey   : 이미 자동 실행한 스트리트 키 (같은 스트리트 두 번 방지)
+  //   armedKey  : "미리 폴드" 를 눌러둔 스트리트 키 (한 스트리트에 한 번만 시도)
+  //   armedHow  : 'fold' | 'checkfold' (무슨 사전 액션을 눌렀는지 — 표시용)
+  //   armedEl   : 그때 누른 버튼 (취소는 같은 버튼을 다시 눌러야 풀린다)
+  //   cancelKey : 사용자가 직접 개입한 핸드 키 (그 핸드는 끝까지 자동 안 함)
+  let autoAct = { timer: null, dueAt: 0, plan: null, key: null, doneKey: null,
+                  armedKey: null, armedHow: null, armedEl: null,
+                  tryKey: null, tries: 0,   // 사전 액션 버튼이 아직 안 떴을 때 재시도용
+                  cancelKey: null, msg: '', msgUntil: 0 };
   let audioCtx = null;
+
+  // 확장을 재로드하면 이 스크립트는 죽은 채 페이지에 남는다.
+  // 걸어둔 반복 타이머를 전부 회수할 수 있게 한 곳에 모아둔다.
+  const intervals = [];
+  const every = (ms, fn) => { intervals.push(setInterval(fn, ms)); };
 
   // 자리 번호가 도는 방향(+1/−1). 한 번 알아내면 그 테이블 내내 같다.
   //   src: 'blinds'(확실) > 'geometry'(자리 좌표로 추정). 블라인드를 보면 덮어쓴다.
@@ -90,10 +115,6 @@
   //  aT,aR = "바가 처음 줄어든 순간"의 시각·비율 (여기부터 평균 속도를 잰다)
   let turnTimer = { active: false, t0: 0, r: 1, aT: 0, aR: 0 };
 
-  function defaultSettings() {
-    return { enabled: true, soundEnabled: true, hands: ['AA', 'KK', 'QQ', 'JJ', 'AKs', 'AKo'] };
-  }
-
   // 확장 컨텍스트 생존 확인 (확장 재로드 후 옛 스크립트의 chrome.* 에러 방지)
   const extensionAlive = () => {
     try { return !!(chrome && chrome.runtime && chrome.runtime.id); } catch (e) { return false; }
@@ -102,14 +123,12 @@
 
   function loadSettings() {
     chrome.storage.local.get('settings', (data) => {
-      if (data && data.settings) settings = Object.assign(defaultSettings(), data.settings);
+      settings = PNHA.merge(data && data.settings);
       log('설정 로드:', settings);
     });
   }
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && changes.settings) {
-      settings = Object.assign(defaultSettings(), changes.settings.newValue || {});
-    }
+    if (area === 'local' && changes.settings) settings = PNHA.merge(changes.settings.newValue);
   });
 
   /* ===== 카드 감지 & 정규화 =============================================== */
@@ -137,114 +156,10 @@
     return [];
   }
 
-  function looksLikeCard(el) {
-    if (!el || el.nodeType !== 1) return false;
-    const cls = (el.className || '').toString().toLowerCase();
-    return !(cls.includes('back') || cls.includes('hidden') || cls.includes('folded'));
-  }
-
-  // 카드 요소 하나 → { rank, suit } (실패 시 null)
-  function parseCardElement(element) {
-    if (!element) return null;
-
-    // 1) 컨테이너 클래스 토큰이 가장 안정적: card-s-<rank> + card-<suit>
-    const byClass = parseFromClassTokens(element);
-    if (byClass) return byClass;
-
-    // 2) .value / .suit 자식 span (<span class="value">A</span><span class="suit">s</span>)
-    if (element.querySelector) {
-      const valueEl = element.querySelector('.value');
-      const suitEl = element.querySelector('.suit:not(.sub-suit)') || element.querySelector('.suit');
-      if (valueEl && suitEl) {
-        const r = normalizeRank(valueEl.textContent);
-        const s = normalizeSuit(suitEl.textContent);
-        if (r && s) return { rank: r, suit: s };
-      }
-    }
-
-    // 3) 표시 텍스트 백업 (예: "A♠")
-    return fromText(element.textContent);
-  }
-
-  // 컨테이너 클래스에서 파싱: card-s-2 → 2, card-s-14 → A / card-c,h,d,s → 무늬
-  function parseFromClassTokens(element) {
-    const nodes = [];
-    if (element.className) nodes.push(element);
-    const cont = element.closest && element.closest('.card-container');
-    if (cont && cont !== element) nodes.push(cont);
-    for (const node of nodes) {
-      const cls = (node.className || '').toString();
-      const rankM = cls.match(/\bcard-s-(\d{1,2})\b/);
-      const suitM = cls.match(/\bcard-([chsd])(?![\w-])/);
-      if (rankM && suitM) {
-        const r = rankNumToRank(rankM[1]);
-        const s = normalizeSuit(suitM[1]);
-        if (r && s) return { rank: r, suit: s };
-      }
-    }
-    return null;
-  }
-
-  const rankNumToRank = (n) =>
-    ({ 2:'2',3:'3',4:'4',5:'5',6:'6',7:'7',8:'8',9:'9',10:'T',11:'J',12:'Q',13:'K',14:'A' })[parseInt(n, 10)] || null;
-
-  function normalizeRank(raw) {
-    if (!raw) return null;
-    let v = raw.toString().trim().toUpperCase();
-    if (v === '10') v = 'T';
-    return RANK_ORDER.hasOwnProperty(v) ? v : null;
-  }
-
-  function normalizeSuit(raw) {
-    if (!raw) return null;
-    const v = raw.toString().trim().toLowerCase();
-    if (v[0] === 's' || v.includes('♠')) return 's';
-    if (v[0] === 'h' || v.includes('♥')) return 'h';
-    if (v[0] === 'd' || v.includes('♦')) return 'd';
-    if (v[0] === 'c' || v.includes('♣')) return 'c';
-    return null;
-  }
-
-  // "A♠", "10♥" 같은 텍스트 → { rank, suit }
-  function fromText(text) {
-    const t = (text || '').replace(/\s+/g, '');
-    const m = t.match(/(10|[2-9TJQKA])([shdc♠♥♦♣])/i);
-    if (!m) return null;
-    const r = normalizeRank(m[1]);
-    const s = normalizeSuit(m[2]);
-    return (r && s) ? { rank: r, suit: s } : null;
-  }
-
-  // 두 카드 → "AA" / "AKs" / "AKo" (높은 랭크 앞)
-  function normalizeHand(a, b) {
-    if (!a || !b) return null;
-    let hi = a, lo = b;
-    if (RANK_ORDER[a.rank] < RANK_ORDER[b.rank]) { hi = b; lo = a; }
-    if (hi.rank === lo.rank) return hi.rank + lo.rank;
-    return hi.rank + lo.rank + (hi.suit === lo.suit ? 's' : 'o');
-  }
-
-  const prettyCard = (c) => c.rank + ({ s: '♠', h: '♥', d: '♦', c: '♣' }[c.suit] || c.suit);
 
   /* ===== 보드(커뮤니티 카드) 읽기 & 족보 계산 ============================ */
 
-  // 랭크 문자('2'~'A') → 숫자(2~14) / 숫자 → 문자
-  const RANK_NUM = (r) => RANK_ORDER[r] + 2;
-  const NUM_RANK = (n) => ({ 14:'A',13:'K',12:'Q',11:'J',10:'T' }[n] || String(n));
 
-  // 요소 목록 → 앞면 카드 { rank, suit } 배열 (같은 카드 중복 제거)
-  function parseCardList(nodeList) {
-    const seen = new Set(), out = [];
-    for (const el of nodeList) {
-      if (!looksLikeCard(el)) continue;
-      const c = parseCardElement(el);
-      if (!c) continue;
-      const k = c.rank + c.suit;
-      if (seen.has(k)) continue;   // 카드-컨테이너/카드 중복 & 물리적 중복 방지
-      seen.add(k); out.push(c);
-    }
-    return out;
-  }
 
   // 보드 카드(3~5장)를 읽는다. holeKeys = 내 홀카드 키 Set (보드에서 제외).
   function readBoardCards(holeKeys) {
@@ -256,77 +171,17 @@
         .filter((c) => !holeKeys.has(c.rank + c.suit));
       if (cards.length >= 3 && cards.length <= 5) return cards;
     }
-    // 2) 폴백: 페이지 전체 앞면 카드 − 내 홀카드 = 보드 (컨테이너 클래스 무관)
-    const all = parseCardList(document.querySelectorAll('.card-container, .card'))
-      .filter((c) => !holeKeys.has(c.rank + c.suit));
+    // 2) 폴백: 자리(.table-player) 밖에 있는 앞면 카드 = 보드 (컨테이너 클래스 무관)
+    //    ★ 자리 안의 카드를 반드시 빼야 한다 — 쇼다운에서 상대 카드가 열리면
+    //      그게 3~5장 범위에 걸려 엉뚱한 족보가 나온다.
+    const loose = Array.from(document.querySelectorAll('.card-container, .card'))
+      .filter((el) => !el.closest('.table-player'));
+    const all = parseCardList(loose).filter((c) => !holeKeys.has(c.rank + c.suit));
     if (all.length >= 3 && all.length <= 5) return all;
     return []; // 프리플롭이거나 감지 실패
   }
 
-  // 카드 배열(숫자 랭크) → 최고 족보 { cat, high, kick }
-  //   cat: 8 스트플 · 7 포카드 · 6 풀하우스 · 5 플러시 · 4 스트레이트
-  //        3 트리플 · 2 투페어 · 1 원페어 · 0 하이카드
-  function evalMade(cards) {
-    const rc = {}, sc = {};
-    for (const c of cards) { rc[c.r] = (rc[c.r] || 0) + 1; (sc[c.s] = sc[c.s] || []).push(c.r); }
-    const ranks = cards.map((c) => c.r);
 
-    const straightHigh = (arr) => {
-      const set = new Set(arr);
-      if (set.has(14)) set.add(1); // A-2-3-4-5(휠)
-      const s = [...set].sort((a, b) => b - a);
-      let run = 1;
-      for (let i = 0; i < s.length - 1; i++) {
-        if (s[i] - 1 === s[i + 1]) { run++; if (run >= 5) return s[i - 3]; }
-        else run = 1;
-      }
-      return 0;
-    };
-
-    let flushSuit = null;
-    for (const s in sc) if (sc[s].length >= 5) flushSuit = s;
-    if (flushSuit) { const h = straightHigh(sc[flushSuit]); if (h) return { cat: 8, high: h }; }
-
-    const byN = (n) => Object.keys(rc).map(Number).filter((r) => rc[r] === n).sort((a, b) => b - a);
-    const quads = byN(4), trips = byN(3), pairs = byN(2);
-    const uniq = [...new Set(ranks)].sort((a, b) => b - a);
-
-    if (quads.length) return { cat: 7, high: quads[0], kick: uniq.find((r) => r !== quads[0]) || 0 };
-    if (trips.length && (pairs.length || trips.length >= 2))
-      return { cat: 6, high: trips[0], kick: trips.length >= 2 ? trips[1] : pairs[0] };
-    if (flushSuit) return { cat: 5, high: sc[flushSuit].slice().sort((a, b) => b - a)[0] };
-    const st = straightHigh(ranks);
-    if (st) return { cat: 4, high: st };
-    if (trips.length) return { cat: 3, high: trips[0] };
-    if (pairs.length >= 2) return { cat: 2, high: pairs[0], kick: pairs[1] };
-    if (pairs.length === 1) return { cat: 1, high: pairs[0], kick: uniq.find((r) => r !== pairs[0]) || 0 };
-    return { cat: 0, high: uniq[0], kick: uniq[1] || 0 };
-  }
-
-  const MADE_NAMES = {
-    8: '스트레이트 플러시', 7: '포카드', 6: '풀하우스', 5: '플러시',
-    4: '스트레이트', 3: '트리플', 2: '투페어', 1: '원페어', 0: '하이카드'
-  };
-
-  // 홀카드 2장 + 보드 → 사람이 읽을 족보 { name, klass, usesHole }
-  function describeMade(c1, c2, board) {
-    const toN = (c) => ({ r: RANK_NUM(c.rank), s: c.suit });
-    const all = [c1, c2, ...board].map(toN);
-    const m = evalMade(all);
-    const b = evalMade(board.map(toN)); // 보드만으로도 같은 족보면 = "보드 플레이"
-
-    let name = MADE_NAMES[m.cat];
-    if (m.cat === 8 && m.high === 14) name = '로열 플러시';
-    const hi = NUM_RANK(m.high), kk = NUM_RANK(m.kick);
-    if (m.cat === 2) name += ' ' + hi + '·' + kk;        // 투페어 K·9
-    else if (m.cat === 6) name += ' ' + hi + '/' + kk;   // 풀하우스 K/9
-    else if (m.cat === 4 || m.cat === 8) name += ' ' + hi + ' high';
-    else name += ' ' + hi;                                // 원페어 K, 트리플 8, 하이카드 A …
-
-    const sameTuple = m.cat === b.cat && m.high === b.high && (m.kick || 0) === (b.kick || 0);
-    const klass = m.cat >= 4 ? 'made-strong' : m.cat >= 1 ? 'made-mid' : 'made-weak';
-    return { name, klass, usesHole: !sameTuple };
-  }
 
   /* ===== 게임 상태 읽기: 내 차례 / 폴드 / 콜 정보 ========================= */
 
@@ -343,11 +198,17 @@
   //  ★ 예약 표시가 안 맞으면 아래 정규식(활성 클래스)을 조정하세요. ★
   const FOLD_ARMED_RE = /\b(active|selected|highlighted|pre-?selected|checked|is-active|toggled)\b/;
   function isFoldArmedInDom() {
-    const btns = document.querySelectorAll('.action-button, button, [role="button"]');
-    for (const b of btns) {
-      if (!(b.textContent || '').trim().toLowerCase().includes('fold')) continue;
-      const cls = ' ' + (b.className || '').toString().toLowerCase() + ' ';
-      if (FOLD_ARMED_RE.test(cls) || b.getAttribute('aria-pressed') === 'true') return true;
+    // 액션 버튼 컨테이너 안에서만 찾는다.
+    // (페이지 전체를 훑으면 채팅·핸드로그의 "fold" 텍스트까지 걸리고, 매 감지마다
+    //  수백 개 요소를 검사하게 된다.)
+    for (const sel of ACTION_ROOT_SELECTORS) {
+      const root = document.querySelector(sel);
+      if (!root) continue;
+      for (const b of root.querySelectorAll('button, .action-button, [role="button"]')) {
+        if (!(b.textContent || '').trim().toLowerCase().includes('fold')) continue;
+        const cls = ' ' + (b.className || '').toString().toLowerCase() + ' ';
+        if (FOLD_ARMED_RE.test(cls) || b.getAttribute('aria-pressed') === 'true') return true;
+      }
     }
     return false;
   }
@@ -410,13 +271,43 @@
     let mine = 0, top = 0;
     for (const seat of document.querySelectorAll('.table-player')) {
       const betEl = seat.querySelector(BET_SELECTOR);
-      const v = (betEl && isClickable(betEl)) ? chipsIn(betEl) : null; // 안 보이는 베팅은 없는 것
+      const v = (betEl && isVisible(betEl)) ? chipsIn(betEl) : null; // 안 보이는 베팅은 없는 것
 
       if (v == null) continue;              // 베팅 없음 또는 "check"
       if (v > top) top = v;
       if (hero && seat === hero) mine = v;
     }
     return { mine, top };
+  }
+
+  // 팟(총 금액) 표시 후보 — PokerNow 는 테이블 중앙에 팟을 보여준다.
+  // ★ 자리 베팅(.table-player-bet-value) 은 스트리트마다 리셋되므로
+  //   포스트플롭 팟 오즈엔 반드시 이 중앙 팟 값을 써야 한다.
+  const POT_SELECTORS = [
+    '.pot-value .normal-value',
+    '.pot .normal-value',
+    '.pot-value',
+    '.pot-ctn .normal-value',
+    '.pot-value-ctn .normal-value'
+  ];
+  // 이번 스트리트의 총 팟 (원래 칩 단위). 중앙 팟 표시 우선, 없으면 전 좌석 베팅 합.
+  function readPot() {
+    for (const sel of POT_SELECTORS) {
+      const el = document.querySelector(sel);
+      const v = el ? chipsIn(el) : null;
+      if (v != null && v > 0) return v;
+    }
+    let sum = 0, found = false;
+    for (const seat of document.querySelectorAll('.table-player')) {
+      const betEl = seat.querySelector(BET_SELECTOR);
+      const v = (betEl && isVisible(betEl)) ? chipsIn(betEl) : null;
+      if (v != null && v > 0) { sum += v; found = true; }
+    }
+    if (!found) {
+      const { sb, bb } = getBlinds();
+      if (sb && bb) return sb + bb;
+    }
+    return sum;
   }
 
   // 콜/체크 버튼 찾기: 클래스 토큰 → 버튼 텍스트 순. (스킨·언어가 달라도 잡히도록)
@@ -435,6 +326,31 @@
       }
     }
     return null;
+  }
+
+  // 레이즈/베트 버튼 찾기 (PokerNow: .raise/.bet, 텍스트 "Raise"/"Bet"/"레이즈")
+  function findRaiseButton() {
+    const roots = ACTION_ROOT_SELECTORS.map((s) => document.querySelector(s)).filter(Boolean);
+    roots.push(document);
+    const clsRe = /\b(raise|bet|all-in|allin)\b/;
+    for (const root of roots) {
+      const btns = Array.from(root.querySelectorAll('button, .action-button, [role="button"]'));
+      for (const el of btns) {
+        if (clsRe.test((el.className || '').toString().toLowerCase()) && isClickable(el)) return el;
+      }
+      for (const el of btns) {
+        const t = (el.textContent || '').trim().toLowerCase();
+        if (/(raise|레이즈|bet|베팅|올\s*인)/.test(t) && isClickable(el)) return el;
+      }
+    }
+    return null;
+  }
+
+  function clickRaiseButton() {
+    const btn = findRaiseButton();
+    if (!btn) return false;
+    btn.click();
+    return true;
   }
 
   /* ===== 자리 순서 · 포지션 ============================================== */
@@ -463,7 +379,7 @@
       const pos = seatPosOf(seat);
       if (pos == null) continue;
       const betEl = seat.querySelector(BET_SELECTOR);
-      map.set(pos, (betEl && isClickable(betEl)) ? chipsIn(betEl) : null);
+      map.set(pos, (betEl && isVisible(betEl)) ? chipsIn(betEl) : null);
     }
     return map;
   }
@@ -596,6 +512,11 @@
     };
   }
 
+  // 지금 더 내야 하는 돈(BB). 0 이면 체크로 넘어갈 수 있다는 뜻.
+  // (HUD 표시와 자동 폴드 판단이 같은 값을 쓰도록 여기 한 곳에서만 계산한다)
+  const toCallBBOf = (a) =>
+    !a ? null : (a.toCallBB != null ? a.toCallBB : (a.canCheck ? 0 : null));
+
   // PokerNow 는 남은 초를 숫자로 안 보여준다. 대신 내 자리에 있는
   // <div class="time-to-talk"> 안의 바 width(%) 가 곧 남은 비율이다. 그걸 그대로 읽는다.
   // (normal-time = 기본 시간, time-bank = 타임뱅크. 둘을 합친 게 남은 전체)
@@ -628,8 +549,32 @@
 
   /* ===== 메인 파이프라인 ================================================== */
 
+  // 팝업이 보여줄 "현재 핸드". 값이 실제로 바뀔 때만 storage 에 쓴다.
+  // (예전엔 매 감지마다 ts 를 새로 붙여 초당 1~2회 디스크 쓰기 + storage.onChanged
+  //  브로드캐스트가 일어났다. 팝업은 어차피 바뀔 때만 다시 그리면 된다.)
+  let lastPublished = null;
+  function publishCurrentHand(cur) {
+    const sig = cur ? [cur.pretty, cur.hand, cur.allowed, cur.myTurn, cur.made].join('|') : '';
+    if (sig === lastPublished) return;
+    lastPublished = sig;
+    safe(() => chrome.storage.local.set({
+      currentHand: cur ? Object.assign({ ts: Date.now() }, cur) : null
+    }));
+  }
+
+  // 상태 진단 (디버그 켜짐 여부와 무관하게, 상태가 바뀔 때만 1줄씩 콘솔에 남긴다)
+  let lastDiag = '';
+  const diagOnce = (label) => {
+    if (label !== lastDiag) { lastDiag = label; console.log('[PokerAlert] 상태:', label); }
+  };
+
+  // 감지 중 예외가 나도 무한 루프가 멈추지 않도록 한 겹 감싼다. (에러는 콘솔에 기록)
   function detectMyHand() {
-    if (!extensionAlive()) { try { observer.disconnect(); } catch (e) {} return; }
+    try { detectMyHandInner(); }
+    catch (e) { console.error('[PokerAlert] 감지 오류:', e && e.stack ? e.stack : e); }
+  }
+  function detectMyHandInner() {
+    if (!extensionAlive()) { shutdown(); return; }
     if (!settings.enabled) { removeOverlay(); return; }
 
     ensureOverlay();
@@ -645,7 +590,9 @@
 
     // 폴드했으면 카드 지움 (예약 상태도 초기화)
     if (isHeroFolded()) {
-      lastRawKey = null; preFoldArmed = false; goIdle(); syncTurnTimer(false);
+      diagOnce('폴드/죽음');
+      lastRawKey = null; preFoldArmed = false; goIdle(); syncTurnTimer(false); cancelAutoAct();
+      publishCurrentHand(null);
       renderOverlay({ hasCards: false, folded: true, myTurn: false, foldArmed: false, action: null,
         stackBB, turnName, position: heroPositionName(updateHandSeats()) });
       return;
@@ -654,11 +601,14 @@
     const myTurn = isMyTurn();
     if (myTurn) preFoldArmed = false; // 내 차례엔 즉시 폴드(예약 개념 없음)
     syncTurnTimer(myTurn);
-    const action = myTurn ? getActionInfo(stack) : null;
+    const action = (myTurn || settings.gtoMode) ? getActionInfo(stack) : null;
     const els = findHoleCardElements();
 
     if (els.length !== 2) {
-      lastRawKey = null; preFoldArmed = false; goIdle();
+      const hero = heroSeat();
+      diagOnce(hero ? ('대기중 · 내 자리는 찾음, 카드 ' + els.length + '장') : '대기중 · 내 자리(.you-player) 를 못 찾음');
+      lastRawKey = null; preFoldArmed = false; goIdle(); cancelAutoAct();
+      publishCurrentHand(null);
       renderOverlay({ hasCards: false, myTurn, foldArmed: false, action, stackBB, turnName, position: null });
       return;
     }
@@ -667,6 +617,7 @@
     const c2 = parseCardElement(els[1]);
     const hand = normalizeHand(c1, c2);
     if (!hand) { renderOverlay({ hasCards: false, myTurn, foldArmed: false, action, stackBB, turnName }); return; }
+    diagOnce('카드 감지: ' + hand);
 
     const allowed = settings.hands.includes(hand);
     const key = [prettyCard(c1), prettyCard(c2)].sort().join('|');
@@ -674,6 +625,10 @@
     // 새 핸드 시작: 블라인드를 내기 전 스택(직전 대기중 스택)을 기준점으로 잡는다
     if (isNewHand) {
       preFoldArmed = false;
+      cancelAutoAct();
+      autoAct.doneKey = null; autoAct.cancelKey = null;
+      autoAct.armedKey = null; autoAct.armedHow = null; autoAct.armedEl = null;
+      autoAct.tryKey = null; autoAct.tries = 0;
       handStartStack = (idleStack != null) ? idleStack : stack;
       handSeats = new Set();
       heroBlindRole = null;
@@ -696,18 +651,36 @@
     const paidBB = (handStartStack != null && stack != null)
       ? toBB(Math.max(0, handStartStack - stack)) : null;
 
+    // GTO 판단 (HUD 권장 표시 + 자동 실행용)
+    let gto = null;
+    if (settings.gtoMode && hand && window.PNHAGTO) {
+      const potBB = (bb && stack != null) ? readPot() / bb : null;
+      gto = window.PNHAGTO.decide({
+        c1, c2, hand, position, board,
+        toCallBB: toCallBBOf(action),
+        potBB,
+        stackBB,
+        tableSize: seats.length,
+        street: board.length,
+        aggroAuto: settings.gtoAggro === 'auto',
+        streetMode: settings.gtoStreet,
+        iterations: Number(settings.gtoSimIter) || 1500
+      });
+    }
+
+    // 자동 폴드 판단 (설정에서 켰을 때만 예약된다)
+    maybeAutoAct({ myTurn, allowed, action, boardLen: board.length, key, hand, gto });
+
     renderOverlay({
       hasCards: true, pretty1: prettyCard(c1), pretty2: prettyCard(c2),
       hand, allowed, myTurn, foldArmed, action, made, boardPretty, stackBB, paidBB,
-      turnName, position
+      turnName, position, gto
     });
 
-    safe(() => chrome.storage.local.set({
-      currentHand: {
-        pretty: prettyCard(c1) + ' ' + prettyCard(c2),
-        hand, allowed, myTurn, made: made ? made.name : null, ts: Date.now()
-      }
-    }));
+    publishCurrentHand({
+      pretty: prettyCard(c1) + ' ' + prettyCard(c2),
+      hand, allowed, myTurn, made: made ? made.name : null
+    });
 
     if (!isNewHand) return;
     lastRawKey = key;
@@ -754,6 +727,13 @@
     #${OVERLAY_ID} .pnha-stat b{display:block;font-size:13px;font-weight:800;color:#e8e8ee;}
     #${OVERLAY_ID} .pnha-stat i{display:block;font-size:9px;font-style:normal;font-weight:700;color:#9aa0b4;margin-top:1px;}
     #${OVERLAY_ID} .pnha-stat.hot b{color:#f0a531;}
+    /* GTO 권장 줄 */
+    #${OVERLAY_ID} .pnha-gto{display:none;margin-top:6px;font-size:12px;font-weight:800;
+      border-radius:7px;padding:4px 6px;background:#12241a;color:#7ee787;}
+    #${OVERLAY_ID} .pnha-gto.fold{background:#2a1c1e;color:#ff5c72;}
+    #${OVERLAY_ID} .pnha-gto.check{background:#141f2e;color:#79b8ff;}
+    #${OVERLAY_ID} .pnha-gto.raise{background:#2a2410;color:#f0d24b;}
+    #${OVERLAY_ID} .pnha-gto.wait{background:#282a36;color:#9aa0b4;}
     /* 내 차례 남은 시간 바 */
     #${OVERLAY_ID} .pnha-turn{margin-top:8px;}
     #${OVERLAY_ID} .pnha-bar{height:6px;border-radius:4px;background:#33353f;overflow:hidden;display:none;}
@@ -779,6 +759,17 @@
     #${OVERLAY_ID} .pnha-call .bb{display:block;font-size:11px;font-weight:700;opacity:.85;margin-top:1px;}
     #${OVERLAY_ID}.collapsed .pnha-body{display:none;}
     #${OVERLAY_ID} .pnha-foldmsg{font-size:10px;color:#9aa0b4;margin-top:5px;height:12px;}
+    /* 자동 폴드: 헤더 토글(🤖) + 실행 대기 줄 */
+    #${OVERLAY_ID} .pnha-auto-toggle{color:#5a5d70;margin-left:auto;}
+    #${OVERLAY_ID} .pnha-auto-toggle ~ .pnha-pop{margin-left:0;}
+    #${OVERLAY_ID}.auto-on .pnha-auto-toggle{color:#7ee787;}
+    #${OVERLAY_ID} .pnha-auto{display:none;margin-top:6px;align-items:center;gap:6px;
+      background:#3a2c12;border:1px solid #7a5a17;border-radius:7px;padding:4px 6px;}
+    #${OVERLAY_ID} .pnha-auto.on{display:flex;}
+    #${OVERLAY_ID} .pnha-auto span{flex:1;text-align:left;font-size:11px;font-weight:800;color:#f0a531;}
+    #${OVERLAY_ID} .pnha-auto button{border:none;border-radius:6px;background:#5a5d70;color:#fff;
+      font-size:11px;font-weight:800;padding:3px 8px;cursor:pointer;}
+    #${OVERLAY_ID} .pnha-auto button:hover{background:#6d7189;}
   `;
 
   // 지정한 document 에 패널을 만들고 이벤트를 연결한다.
@@ -793,8 +784,10 @@
     const box = doc.createElement('div');
     box.id = OVERLAY_ID;
     if (inPip) box.classList.add('pip');
-    const headBtns = inPip ? ''
-      : '<span class="pnha-btn pnha-pop" title="다른 창 위에 띄우기">⧉</span>' +
+    const autoBtn = '<span class="pnha-btn pnha-auto-toggle" title="자동 폴드 켜기/끄기">🤖</span>';
+    const headBtns = inPip ? autoBtn
+      : autoBtn +
+        '<span class="pnha-btn pnha-pop" title="다른 창 위에 띄우기">⧉</span>' +
         '<span class="pnha-btn pnha-min" title="접기/펼치기">–</span>';
     box.innerHTML = `
       <div class="pnha-head"><span>♠ Hand Alert</span>${headBtns}</div>
@@ -811,6 +804,7 @@
           <span class="pnha-stat pnha-s-paid"><b>—</b><i>낸 돈</i></span>
           <span class="pnha-stat pnha-s-tocall"><b>—</b><i>더 낼 돈</i></span>
         </div>
+        <div class="pnha-gto"></div>
         <div class="pnha-turn">
           <div class="pnha-bar"><i></i></div>
           <div class="pnha-turntext">대기중</div>
@@ -820,6 +814,7 @@
           <button class="pnha-check" type="button">체크</button>
           <button class="pnha-fold" type="button">폴드</button>
         </div>
+        <div class="pnha-auto"><span></span><button type="button">취소</button></div>
         <div class="pnha-foldmsg"></div>
       </div>`;
     doc.body.appendChild(box);
@@ -832,32 +827,42 @@
       mPos: q('.pnha-m-pos b'), mTurn: q('.pnha-m-turn b'), mTurnBox: q('.pnha-m-turn'),
       sStack: q('.pnha-s-stack b'), sPaid: q('.pnha-s-paid b'),
       sToCall: q('.pnha-s-tocall b'), sToCallBox: q('.pnha-s-tocall'),
-      foldmsg: q('.pnha-foldmsg'), min: q('.pnha-min'), pop: q('.pnha-pop'), head: q('.pnha-head')
+      gto: q('.pnha-gto'),
+      foldmsg: q('.pnha-foldmsg'), min: q('.pnha-min'), pop: q('.pnha-pop'), head: q('.pnha-head'),
+      autoBox: q('.pnha-auto'), autoTxt: q('.pnha-auto span'),
+      autoCancel: q('.pnha-auto button'), autoToggle: q('.pnha-auto-toggle')
     };
+
+    // 🤖 헤더 버튼: 자동 폴드 ON/OFF (팝업 설정과 같은 값을 쓴다)
+    els.autoToggle.addEventListener('click', () => {
+      const on = !settings.autoFold;
+      settings = Object.assign({}, settings, { autoFold: on });
+      safe(() => chrome.storage.local.set({ settings }));
+      if (on) { autoAct.cancelKey = null; autoAct.armedKey = null; autoAct.armedHow = null; autoAct.armedEl = null; }
+      else cancelAutoForHand('');
+      flash(els, on ? '자동 폴드 ON' : '자동 폴드 OFF');
+      detectMyHand();
+    });
+
+    // 대기 중 취소 → 이번 핸드는 자동으로 누르지 않는다
+    els.autoCancel.addEventListener('click', () => { cancelAutoForHand('🤖 이번 핸드 취소함'); });
 
     els.call.addEventListener('click', () => {
       if (!lastState.myTurn) { flash(els, '내 차례 아님'); return; }
-      flash(els, clickCallButton() ? '✓ 콜' : '콜 버튼 없음');
+      flash(els, clickFound('call') ? '✓ 콜' : '콜 버튼 없음');
       detectMyHand();
     });
 
     els.check.addEventListener('click', () => {
       if (!lastState.myTurn) { flash(els, '내 차례 아님'); return; }
-      flash(els, clickCheckButton() ? '✓ 체크' : '체크 버튼 없음');
+      flash(els, clickFound('check') ? '✓ 체크' : '체크 버튼 없음');
       detectMyHand();
     });
 
     els.fold.addEventListener('click', () => {
-      const myTurn = !!lastState.myTurn;
-      const wasArmed = !!lastState.foldArmed;
-      const ok = clickFoldButton();
-      if (!ok) { flash(els, '폴드 버튼 없음 (내 차례 아님)'); return; }
-      if (myTurn) {
-        flash(els, '✓ 폴드');             // 내 차례 → 즉시 폴드
-      } else {
-        preFoldArmed = !wasArmed;         // 내 차례 전 → 예약 ↔ 취소 토글
-        flash(els, preFoldArmed ? '✓ 폴드 예약함' : '✓ 예약 취소');
-      }
+      const r = performFold();
+      if (!r.ok) { flash(els, '폴드 버튼 없음 (내 차례 아님)'); return; }
+      flash(els, r.myTurn ? '✓ 폴드' : (r.armed ? '✓ 폴드 예약함' : '✓ 예약 취소'));
       detectMyHand();                     // 버튼 라벨 즉시 갱신
     });
     if (els.min) els.min.addEventListener('click', () => {
@@ -884,8 +889,10 @@
 
   // 패널을 항상-위 PiP 창으로 빼내기 (다른 창/앱 위에도 표시)
   async function openPiP() {
+    // 안내는 패널 안에서 한다 (게임 화면에 모달을 띄우지 않는다)
     if (!('documentPictureInPicture' in window)) {
-      alert('이 Chrome 은 Picture-in-Picture 팝아웃을 지원하지 않습니다. Chrome 116 이상으로 업데이트하세요.');
+      if (overlayEls) flash(overlayEls, '팝아웃 미지원 (Chrome 116+)');
+      log('documentPictureInPicture 미지원');
       return;
     }
     try {
@@ -950,6 +957,8 @@
     }
 
     box.classList.toggle('my-turn', !!state.myTurn);
+    box.classList.toggle('auto-on', !!settings.autoFold);
+    paintAuto();
 
     // 내 포지션 / 지금 누구 차례
     overlayEls.mPos.textContent = state.position || '—';
@@ -960,13 +969,29 @@
     const a = state.action;
     const bbText = (v) => (v == null ? '—' : fmtBB(v) + ' BB');
     // 체크만 하면 되는 상황이면 더 낼 돈은 0 BB
-    const toCallBB = state.myTurn && a
-      ? (a.toCallBB != null ? a.toCallBB : (a.canCheck ? 0 : null))
-      : null;
+    const toCallBB = state.myTurn ? toCallBBOf(a) : null;
     overlayEls.sStack.textContent = bbText(state.stackBB);
     overlayEls.sPaid.textContent = bbText(state.paidBB);
     overlayEls.sToCall.textContent = state.myTurn ? bbText(toCallBB) : '—';
     overlayEls.sToCallBox.classList.toggle('hot', !!toCallBB);
+
+    // GTO 권장 표시 (내 차례가 아니어도 항상 보여준다)
+    const gtoEl = overlayEls.gto;
+    if (settings.gtoMode && state.gto && state.gto.action) {
+      gtoEl.style.display = 'block';
+      gtoEl.className = 'pnha-gto ' + state.gto.action;
+      const actLabel = { fold: '폴드', call: '콜', check: '체크', raise: '레이즈' }[state.gto.action] || '';
+      if (state.gto.action === 'wait') {
+        gtoEl.textContent = 'GTO: ' + (state.gto.reason || '직접 실행');
+      } else {
+        const eq = state.gto.equity != null ? Math.round(state.gto.equity * 100) + '%' : '';
+        const req = state.gto.required != null ? Math.round(state.gto.required * 100) + '%' : '';
+        gtoEl.textContent = 'GTO: ' + actLabel + (eq ? '  (' + eq + ' vs ' + req + ')' : '');
+      }
+      gtoEl.title = state.gto.reason || '';
+    } else {
+      gtoEl.style.display = 'none';
+    }
 
     paintTimer();
 
@@ -1059,7 +1084,39 @@
       ? '내 차례 · ' + Math.ceil(left) + '초'
       : '내 차례 · ' + Math.floor(elapsed) + '초 경과';
   }
-  setInterval(paintTimer, 200);
+  every(200, paintTimer);
+
+  // 자동 폴드 대기 줄: 남은 시간 카운트다운 / 실행 결과 메시지
+  function paintAuto() {
+    if (!overlayEls || !overlayEls.autoBox) return;
+    const { autoBox, autoTxt, autoCancel } = overlayEls;
+    if (autoAct.timer) {
+      const left = Math.max(0, autoAct.dueAt - Date.now()) / 1000;
+      autoBox.classList.add('on');
+      autoCancel.style.display = '';
+      const planLabel = { check: '자동 체크', call: '자동 콜', raise: '자동 레이즈', fold: '자동 폴드' }[autoAct.plan] || '자동 액션';
+      autoTxt.textContent = '🤖 ' + planLabel + ' ' + left.toFixed(1) + '초';
+    } else if (settings.autoFold && isArmed() && !lastState.folded) {
+      // 예약해둔 상태는 내 차례가 올 때까지 계속 보여준다 (언제든 취소 가능)
+      autoBox.classList.add('on');
+      autoCancel.style.display = '';
+      autoTxt.textContent = '🤖 ' + (autoAct.armedHow === 'checkfold' ? '체크/폴드 예약됨' : '폴드 예약됨') +
+        ' · 취소 안 하면 폴드';
+    } else if (autoAct.msg && Date.now() < autoAct.msgUntil) {
+      autoBox.classList.add('on');
+      autoCancel.style.display = 'none';
+      autoTxt.textContent = autoAct.msg;
+    } else {
+      autoBox.classList.remove('on');
+    }
+  }
+  // 카운트다운이 도는 동안만 촘촘히(0.1초), 평소엔 느슨하게(0.6초) 갱신한다.
+  // (0.1초마다 계속 도는 건 자동 폴드 예약 확인까지 끌고 들어와서 낭비였다)
+  let autoTickTimer = null;
+  (function autoTick() {
+    paintAuto();
+    autoTickTimer = setTimeout(autoTick, autoAct.timer ? 100 : 600);
+  })();
 
   // 헤더를 잡고 드래그해 위치 이동
   function makeDraggable(box, handle) {
@@ -1084,7 +1141,7 @@
 
   function playBeep() {
     try {
-      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (!audioCtx) audioCtx = new AudioContext();
       const now = audioCtx.currentTime;
       [0, 0.18].forEach((offset, i) => {
         const osc = audioCtx.createOscillator();
@@ -1103,24 +1160,53 @@
 
   /* ===== 수동 Fold (오버레이 버튼 / F 키 / 팝업에서 호출) ================= */
 
-  function clickFoldButton() {
+  // Fold 버튼 "찾기" (누르지는 않는다 — 자동 예약 취소에 버튼 참조가 필요해서 분리)
+  function findFoldButton() {
     for (const sel of FOLD_BUTTON_SELECTORS) {
       let btn = null;
       try { btn = document.querySelector(sel); } catch (e) {}
-      if (btn && isClickable(btn)) { btn.click(); return true; }
+      if (btn && isClickable(btn)) return btn;
     }
     const candidates = Array.from(document.querySelectorAll('button, [role="button"], .action-button'));
     // 정확히 "Fold" → 사전 액션 "...fold..." 순으로 시도
     for (const el of candidates) {
       const t = (el.textContent || '').trim().toLowerCase();
-      if ((t === 'fold' || t === '폴드') && isClickable(el)) { el.click(); return true; }
+      if ((t === 'fold' || t === '폴드') && isClickable(el)) return el;
     }
     for (const el of candidates) {
       const t = (el.textContent || '').trim().toLowerCase();
-      if (t.includes('fold') && isClickable(el)) { el.click(); return true; }
+      if (t.includes('fold') && isClickable(el)) return el;
     }
-    log('Fold 버튼을 찾지 못함 (내 차례가 아니거나 셀렉터 확인 필요)');
-    return false;
+    return null;
+  }
+
+  function clickFoldButton() {
+    const btn = findFoldButton();
+    if (!btn) {
+      log('Fold 버튼을 찾지 못함 (내 차례가 아니거나 셀렉터 확인 필요)');
+      return false;
+    }
+    btn.click();
+    return true;
+  }
+
+  /* 사용자가 요청한 폴드는 전부 이 함수를 지나간다 (오버레이 버튼 / F 키 / 팝업).
+   * 내 차례면 즉시 폴드, 아니면 PokerNow 의 "미리 폴드" 예약 ↔ 취소 토글이므로
+   * 한 곳에서 preFoldArmed 를 갱신해야 HUD 표시가 어긋나지 않는다.
+   * (예전엔 오버레이 버튼만 이 상태를 갱신해서, F 키로 예약하면 패널은 계속
+   *  "미리 폴드" 라고 표시됐다.) */
+  function performFold() {
+    const myTurn = isMyTurn();
+    const wasArmed = !myTurn && (preFoldArmed || isFoldArmedInDom());
+    if (!clickFoldButton()) return { ok: false, myTurn, armed: preFoldArmed };
+
+    preFoldArmed = myTurn ? false : !wasArmed;
+    if (!myTurn && !preFoldArmed) {
+      // 사용자가 예약을 직접 풀었다 → 자동 폴드도 이번 핸드는 손대지 않는다
+      autoAct.armedKey = null; autoAct.armedHow = null; autoAct.armedEl = null;
+      autoAct.cancelKey = lastRawKey;
+    }
+    return { ok: true, myTurn, armed: preFoldArmed };
   }
 
   // 콜 / 체크 버튼 클릭 (사용자가 오버레이 버튼을 눌렀을 때만 호출됨)
@@ -1131,13 +1217,17 @@
     btn.click();
     return true;
   }
-  const clickCallButton = () => clickFound('call');
-  const clickCheckButton = () => clickFound('check');
 
-  function isClickable(el) {
-    if (!el || el.disabled) return false;
+  // 화면에 자리를 차지하고 있는지. 레이아웃만 보므로 자리마다 도는 곳에서 써도 싸다.
+  function isVisible(el) {
+    if (!el) return false;
     const r = el.getBoundingClientRect();
-    if (r.width === 0 && r.height === 0) return false;
+    return r.width > 0 || r.height > 0;
+  }
+
+  // 실제로 누를 수 있는 버튼인지 (보이고 + disabled 아님 + display/visibility 확인)
+  function isClickable(el) {
+    if (!el || el.disabled || !isVisible(el)) return false;
     const s = getComputedStyle(el);
     return s.display !== 'none' && s.visibility !== 'hidden';
   }
@@ -1152,15 +1242,273 @@
     document.addEventListener('keydown', (e) => {
       if (e.ctrlKey || e.altKey || e.metaKey || isTypingTarget(e.target)) return;
       if ((e.key || '').toLowerCase() !== FOLD_HOTKEY.toLowerCase()) return;
-      if (clickFoldButton()) e.preventDefault();
+      const r = performFold();
+      if (!r.ok) return;
+      e.preventDefault();
+      if (overlayEls) flash(overlayEls, r.myTurn ? '✓ 폴드' : (r.armed ? '✓ 폴드 예약함' : '✓ 예약 취소'));
+      detectMyHand();                     // 패널 표시를 바로 맞춘다
     }, true);
   }
+
+  /* ===== 자동 폴드 (settings.autoFold 를 켰을 때만) ======================
+   * 기본 방식('prefold'): 카드를 받자마자 PokerNow 의 "미리 폴드(사전 액션)"
+   *   버튼을 대신 눌러둔다. 내가 취소하지 않으면 내 차례가 왔을 때 PokerNow 가
+   *   알아서 폴드한다. 예약해두는 것뿐이라 취소할 시간이 넉넉하다.
+   * 보조 방식('turn'): 내 차례가 됐을 때 N초 기다렸다가 폴드 버튼을 누른다.
+   *   (prefold 모드에서도 예약이 안 먹었으면 이 방식으로 폴백한다.)
+   *
+   * 공통 규칙:
+   *   - 내 홀카드가 "지정한 핸드" 면 아무것도 하지 않는다 (내가 직접 플레이).
+   *   - autoCheckFree 면 "Check/Fold" 사전 액션을 우선 눌러 공짜 체크를 살린다.
+   *   - autoPreflopOnly 면 플롭 이후에는 손대지 않는다.
+   *   - 한 스트리트에 예약 1번 / 실행 1번.
+   *   - 취소하면 그 핸드는 끝까지 자동으로 누르지 않는다.
+   * ===================================================================== */
+
+  // 스트리트 식별자: 같은 핸드라도 프리플롭/플롭/턴/리버를 따로 센다
+  const streetKey = (handKey, boardLen) => handKey + '#' + boardLen;
+
+  // 예약된 타이머만 지운다 (사전 액션 예약은 건드리지 않는다)
+  function cancelAutoAct() {
+    if (autoAct.timer) clearTimeout(autoAct.timer);
+    autoAct.timer = null; autoAct.key = null; autoAct.dueAt = 0; autoAct.plan = null;
+  }
+
+  const setAutoMsg = (msg, ms) => { autoAct.msg = msg; autoAct.msgUntil = Date.now() + (ms || 2000); };
+
+  // 지금 "미리 폴드" 가 걸려 있는지 (우리가 걸었든 사용자가 걸었든)
+  const isArmed = () => !!autoAct.armedKey && (preFoldArmed || isFoldArmedInDom());
+
+  // 대기 중인 타이머만 취소 (사용자가 페이지를 직접 조작했을 때)
+  function abortAutoTimer(msg) {
+    if (!autoAct.timer) return;
+    cancelAutoAct();
+    autoAct.cancelKey = lastRawKey;   // 이번 핸드는 사용자가 직접 하기로 함
+    setAutoMsg(msg || '자동 폴드 취소됨', 1600);
+    paintAuto();
+  }
+
+  // 취소 버튼: 예약을 풀고, 이번 핸드는 다시 예약하지 않는다
+  function cancelAutoForHand(msg) {
+    const wasArmed = isArmed();
+    cancelAutoAct();
+    if (wasArmed && !isMyTurn()) {
+      // 사전 액션은 토글 — 예약할 때 누른 "그 버튼" 을 다시 눌러야 풀린다
+      const el = autoAct.armedEl;
+      if (el && document.contains(el) && isClickable(el)) el.click();
+      else clickFoldButton();
+      preFoldArmed = false;
+    }
+    autoAct.armedKey = null; autoAct.armedHow = null; autoAct.armedEl = null;
+    autoAct.cancelKey = lastRawKey;
+    setAutoMsg(msg || '자동 폴드 취소함', 2000);
+    paintAuto();
+  }
+
+  // 사전 액션 걸기: 공짜 체크를 살리려면 "Check/Fold" 를, 없으면 "Fold" 를 누른다.
+  // 나중에 취소할 수 있도록 실제로 누른 버튼을 함께 돌려준다.
+  function armPreFold() {
+    if (settings.autoCheckFree) {
+      const cands = document.querySelectorAll('button, [role="button"], .action-button');
+      for (const el of cands) {
+        const t = (el.textContent || '').trim().toLowerCase().replace(/\s+/g, '');
+        if (/(check\/?fold|체크\/?폴드)/.test(t) && isClickable(el)) {
+          el.click();
+          return { how: 'checkfold', el };
+        }
+      }
+    }
+    const fold = findFoldButton();
+    if (!fold) return null;
+    fold.click();
+    return { how: 'fold', el: fold };
+  }
+
+  function maybeAutoAct(ctx) {
+    if (!settings.autoFold) { cancelAutoAct(); return; }
+    if (settings.gtoMode) { maybeAutoGto(ctx); return; }  // GTO 경로
+    if (ctx.allowed) { cancelAutoAct(); return; }                    // 지정 핸드 → 내가 직접
+    if (settings.autoPreflopOnly && ctx.boardLen >= 3) { cancelAutoAct(); return; }
+    if (autoAct.cancelKey === ctx.key) { cancelAutoAct(); return; }  // 사용자가 취소한 핸드
+
+    const sk = streetKey(ctx.key, ctx.boardLen);
+
+    // ① 아직 내 차례가 아님 → "미리 폴드" 를 눌러둔다 (기본 방식)
+    if (!ctx.myTurn) {
+      if (settings.autoMode === 'turn') { cancelAutoAct(); return; }
+      if (autoAct.armedKey === sk) return;          // 이 스트리트엔 이미 시도함
+      if (autoAct.tryKey !== sk) { autoAct.tryKey = sk; autoAct.tries = 0; }
+
+      const armed = armPreFold();
+      if (armed) {
+        autoAct.armedKey = sk;                      // 성공 → 이 스트리트엔 더 안 누른다
+        autoAct.armedHow = armed.how;
+        autoAct.armedEl = armed.el;
+        preFoldArmed = true;
+        setAutoMsg(armed.how === 'checkfold' ? '🤖 체크/폴드 예약함' : '🤖 폴드 예약함', 2500);
+        log('사전 폴드 예약:', ctx.hand, armed.how);
+        return;
+      }
+
+      // 버튼이 아직 안 떴을 수 있으니 몇 번은 다시 시도하고, 그래도 없으면 포기.
+      // (포기해도 내 차례가 오면 아래 ② 폴백이 폴드한다)
+      autoAct.tries += 1;
+      if (autoAct.tries >= 5) {
+        autoAct.armedKey = sk; autoAct.armedHow = null; autoAct.armedEl = null;
+        setAutoMsg('🤖 예약 버튼 없음 · 내 차례에 폴드', 2500);
+        log('사전 폴드 예약 실패 — 내 차례 폴백으로 넘김:', ctx.hand);
+      }
+      return;
+    }
+
+    // ② 내 차례인데 아직 안 죽었다 = 예약이 안 먹었거나 'turn' 모드
+    //    → 대기시간 후 직접 폴드 (그 사이 클릭/키 입력하면 취소)
+    if (autoAct.doneKey === sk) return;
+    if (autoAct.timer && autoAct.key === sk) return;
+    cancelAutoAct();
+
+    const toCall = toCallBBOf(ctx.action);
+    const delay = Math.max(0, Number(settings.autoFoldDelay) || 0) * 1000;
+    autoAct.key = sk;
+    autoAct.plan = (settings.autoCheckFree && toCall === 0) ? 'check' : 'fold';
+    autoAct.dueAt = Date.now() + delay;
+    autoAct.timer = setTimeout(() => { autoAct.timer = null; runAutoAct(sk); }, delay);
+    log('자동', autoAct.plan, '예약:', ctx.hand, (delay / 1000) + '초 후');
+    paintAuto();
+  }
+
+  /* ===== GTO 모드 (settings.gtoMode 를 켰을 때만) =======================
+   * 프리플롭/포스트플롭 결정은 gto.js(window.PNHAGTO)가 내리고,
+   * 여기서는 "내 차례에 N초 뒤 그대로 클릭"만 담당한다.
+   * 사전 폴드 예약은 하지 않는다 — GTO 판단은 베팅이 바뀌면 계속 달라지므로,
+   * 미리 폴드를 걸어두면 "콜해야 할 핸드"를 실수로 폴드할 수 있기 때문.
+   * ===================================================================== */
+
+  function maybeAutoGto(ctx) {
+    if (autoAct.cancelKey === ctx.key) { cancelAutoAct(); return; }
+    const sk = streetKey(ctx.key, ctx.boardLen);
+    if (!ctx.myTurn) { cancelAutoAct(); return; }      // 내 차례에만 실행
+
+    if (autoAct.doneKey === sk) return;                 // 이 스트리트는 이미 실행함
+    if (autoAct.timer && autoAct.key === sk) return;    // 이미 예약됨
+
+    const dec = ctx.gto;
+    if (!dec) return;
+    if (dec.action === 'wait' || (dec.action === 'raise' && settings.gtoAggro !== 'auto')) {
+      // 레이즈는 사용자가 직접 (권장만 표시)
+      cancelAutoAct();
+      setAutoMsg('🤖 GTO: ' + (dec.reason || '직접 실행') + ' · 직접 누르세요', 2500);
+      return;
+    }
+
+    cancelAutoAct();
+    const delay = Math.max(0, Number(settings.autoFoldDelay) || 0) * 1000;
+    autoAct.key = sk;
+    autoAct.plan = dec.action;
+    autoAct.dueAt = Date.now() + delay;
+    autoAct.timer = setTimeout(() => { autoAct.timer = null; runAutoAct(sk); }, delay);
+    log('GTO 자동', dec.action, '예약:', ctx.hand, (delay / 1000) + '초 후', dec.reason || '');
+    paintAuto();
+  }
+
+  // 실행 시점의 DOM 상태로 GTO 판단을 다시 내린다 (그 사이 상황이 바뀌었을 수 있음)
+  function computeGtoNow() {
+    try {
+      const bb = getBigBlind();
+      const stack = readHeroStack();
+      const els = findHoleCardElements();
+      if (els.length !== 2) return null;
+      const c1 = parseCardElement(els[0]);
+      const c2 = parseCardElement(els[1]);
+      const hand = normalizeHand(c1, c2);
+      if (!hand) return null;
+      const holeKeys = new Set([c1.rank + c1.suit, c2.rank + c2.suit]);
+      const board = readBoardCards(holeKeys);
+      const seats = updateHandSeats();
+      learnSeatDir(seats, board.length);
+      const position = heroPositionName(seats);
+      const action = getActionInfo(stack);
+      const potBB = bb ? readPot() / bb : null;
+      return window.PNHAGTO.decide({
+        c1, c2, hand, position, board,
+        toCallBB: toCallBBOf(action),
+        potBB,
+        stackBB: (stack != null && bb) ? stack / bb : null,
+        tableSize: seats.length,
+        street: board.length,
+        aggroAuto: settings.gtoAggro === 'auto',
+        streetMode: settings.gtoStreet,
+        iterations: Number(settings.gtoSimIter) || 1500
+      });
+    } catch (e) { log('GTO 재판단 오류:', e); return null; }
+  }
+
+  function runAutoAct(sk) {
+    autoAct.key = null; autoAct.dueAt = 0; autoAct.plan = null;
+
+    // 실행 직전에 조건을 처음부터 다시 확인한다 (기다리는 사이 상황이 바뀔 수 있다)
+    if (!settings.enabled || !settings.autoFold) return;
+    if (autoAct.cancelKey === lastRawKey) return;
+    if (!isMyTurn() || isHeroFolded()) return;
+
+    const els = findHoleCardElements();
+    if (els.length !== 2) return;
+    const c1 = parseCardElement(els[0]);
+    const c2 = parseCardElement(els[1]);
+    const hand = normalizeHand(c1, c2);
+    if (!hand) return;
+
+    let action = null, reason = '', equity = null, required = null;
+    if (settings.gtoMode) {
+      // GTO: 실행 시점에 다시 판단한다
+      const dec = computeGtoNow();
+      if (!dec) return;
+      action = dec.action; reason = dec.reason || ''; equity = dec.equity; required = dec.required;
+      if (action === 'wait' || (action === 'raise' && settings.gtoAggro !== 'auto')) {
+        setAutoMsg('🤖 GTO: 레이즈 권장 · 직접 누르세요', 2500);
+        return;
+      }
+    } else {
+      if (settings.hands.includes(hand)) return;         // 지정 핸드면 손대지 않는다
+      const toCall = toCallBBOf(getActionInfo(readHeroStack()));
+      action = (settings.autoCheckFree && toCall === 0) ? 'check' : 'fold';
+    }
+
+    let ok = false;
+    if (action === 'check') ok = clickFound('check');
+    else if (action === 'call') ok = clickFound('call');
+    else if (action === 'raise') ok = clickRaiseButton();
+    else ok = clickFoldButton();
+
+    autoAct.doneKey = sk;
+    const label = { fold: '폴드', call: '콜', check: '체크', raise: '레이즈' }[action] || '액션';
+    setAutoMsg(ok ? '🤖 자동 ' + label + '함' : '🤖 버튼을 못 찾음');
+    log('자동 액션:', action, ok ? '성공' : '실패', hand, reason);
+    detectMyHand();
+  }
+
+  // 내 차례에 카운트다운이 도는 중이라면, 페이지를 직접 조작한 순간 취소한다.
+  // (예약만 걸려 있는 상태는 여기서 풀지 않는다 — 취소 버튼으로만 푼다.)
+  document.addEventListener('mousedown', (e) => {
+    if (!autoAct.timer) return;
+    const box = document.getElementById(OVERLAY_ID);
+    if (box && box.contains(e.target)) return;   // 패널 자체 조작은 취소로 보지 않음
+    abortAutoTimer('내가 직접 조작 → 자동 취소');
+  }, true);
+  document.addEventListener('keydown', () => {
+    if (autoAct.timer) abortAutoTimer('내가 직접 조작 → 자동 취소');
+  }, true);
 
   /* ===== 팝업 메시지 & 시작 ============================================== */
 
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg && msg.type === 'PING_DETECT') { detectMyHand(); sendResponse({ ok: true }); }
-    else if (msg && msg.type === 'MANUAL_FOLD') { sendResponse({ ok: clickFoldButton() }); }
+    else if (msg && msg.type === 'MANUAL_FOLD') {
+      cancelAutoAct();
+      const r = performFold();            // 오버레이·F 키와 똑같은 경로 (예약 상태 공유)
+      detectMyHand();
+      sendResponse(r);
+    }
     return false;
   });
 
@@ -1176,9 +1524,26 @@
   }
   const observer = new MutationObserver(scheduleDetect);
 
+  // 확장이 죽었을 때(재로드 등) 페이지에 남은 이 스크립트를 완전히 정지시킨다.
+  function shutdown() {
+    try { observer.disconnect(); } catch (e) { /* ignore */ }
+    intervals.forEach(clearInterval);
+    intervals.length = 0;
+    if (autoTickTimer) { clearTimeout(autoTickTimer); autoTickTimer = null; }
+    if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
+    if (autoAct.timer) { clearTimeout(autoAct.timer); autoAct.timer = null; }
+    removeOverlay();
+  }
+
   function start() {
-    observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'style'] });
-    setInterval(() => { if (extensionAlive()) detectMyHand(); }, HEARTBEAT_MS);
+    let ver = '?';
+    try { ver = chrome.runtime.getManifest().version; } catch (e) {}
+    console.log('[PokerAlert] 시작됨 — 확장 v' + ver + ' · 자동폴드:', settings.autoFold, '· GTO:', settings.gtoMode);
+    // ★ style 은 감시하지 않는다 — PokerNow 가 타이머 바의 style.width 를 쉬지 않고
+    //   바꿔서, 넣어두면 콜백이 초당 수백 번 호출된다. 남은 시간은 paintTimer 가
+    //   200ms 마다 직접 읽으므로 감시할 이유가 없다.
+    observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['class'] });
+    every(HEARTBEAT_MS, detectMyHand);   // detectMyHand 안에서 생존 확인 → 죽으면 shutdown
     log('감지 시작.');
     detectMyHand();
   }

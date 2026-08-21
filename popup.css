@@ -33,6 +33,7 @@ body {
   font-weight: 700;
   color: #7ee787;
 }
+.status-row .status-text.off { color: #f85149; }
 
 .section-title {
   font-size: 11px;
@@ -121,6 +122,45 @@ body {
 .fold-msg.ok { color: #7ee787; }
 .fold-msg.err { color: #f85149; }
 
+/* 자동 폴드 섹션 */
+.auto-section {
+  margin-top: 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #282a36;
+  border: 1px solid #33353f;
+}
+.auto-section.on { border-color: #7a5a17; background: #2f2a1d; }
+.auto-section .row { margin: 4px 0; }
+.auto-section .label small { color: #9aa0b4; }
+.auto-opts { display: none; margin-top: 4px; }
+.auto-section.on .auto-opts { display: block; }
+.row.sub { font-size: 12px; color: #9aa0b4; }
+.row.sub select {
+  background: #1e1f26;
+  color: #e8e8ee;
+  border: 1px solid #4a4d5e;
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+.chk {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #cfd2e0;
+  padding: 3px 0;
+  cursor: pointer;
+}
+.auto-warn {
+  margin-top: 6px;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: #9aa0b4;
+}
+.auto-section.on .auto-warn { color: #f0a531; }
+
 /* 토글 스위치 */
 .switch {
   position: relative;
@@ -154,19 +194,6 @@ input:checked + .slider::before { transform: translateX(18px); }
 
 /* 버튼 */
 .actions { margin-top: 14px; }
-.save-btn {
-  width: 100%;
-  padding: 9px;
-  border: none;
-  border-radius: 8px;
-  background: #2ea043;
-  color: #fff;
-  font-weight: 700;
-  font-size: 14px;
-  cursor: pointer;
-}
-.save-btn:hover { background: #3fb950; }
-
 .options-link {
   display: block;
   margin-top: 8px;
