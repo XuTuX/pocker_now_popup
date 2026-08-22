@@ -96,7 +96,7 @@
                   armedKey: null, armedHow: null, armedEl: null,
                   tryKey: null, tries: 0,   // 사전 액션 버튼이 아직 안 떴을 때 재시도용
                   cancelKey: null, msg: '', msgUntil: 0,
-                  runTries: {}, verifyFail: 0 };
+                  runTries: {}, verifyFail: 0, busyKey: null };
   let audioCtx = null;
 
   // 핸드 경계 판별용: 카드가 사라진(대기/폴드) 틱 수, 직전 보드 장수
@@ -142,7 +142,22 @@
     });
   }
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && changes.settings) settings = PNHA.merge(changes.settings.newValue);
+    if (area !== 'local' || !changes.settings) return;
+    settings = PNHA.merge(changes.settings.newValue);
+
+    // 타이머만 지우면 PokerNow 쪽에 이미 눌러둔 사전 액션은 남는다.
+    // 설정 변경으로 더 이상 자동 폴드를 하면 안 되는 경우에는 사이트의
+    // 예약도 함께 해제한다.
+    const currentHandAllowed = !!(lastState && lastState.hasCards &&
+      lastState.hand && settings.hands.includes(lastState.hand));
+    const currentPostflopDisabled = !!(lastState && lastState.hasCards &&
+      settings.autoPreflopOnly && Array.isArray(lastState.boardPretty) &&
+      lastState.boardPretty.length >= 3);
+    if (!settings.enabled || !settings.autoFold || settings.gtoMode ||
+        settings.autoMode === 'turn' || currentHandAllowed || currentPostflopDisabled) {
+      disarmOwnedPreFold();
+      cancelAutoAct();
+    }
   });
 
   /* ===== 카드 감지 & 정규화 =============================================== */
@@ -382,18 +397,24 @@
     }
     if (central != null && sum > 0 && central < sum) potIncludesBets = false; // 확실히 미포함
 
-    if (central == null) {
-      if (sum > 0) return sum;
-      const { sb, bb } = getBlinds();
-      return (sb && bb) ? sb + bb : 0;
-    }
+    // 중앙 팟을 못 읽은 상태에서 현재 스트리트 베팅이나 블라인드만으로
+    // 전체 팟을 추정하면 포스트플롭 팟 오즈가 크게 왜곡된다. 모르면 GTO가
+    // 판단을 보류하도록 null을 반환한다.
+    if (central == null) return null;
     return potIncludesBets ? central : central + sum;
   }
 
+  const readPotBB = (bb) => {
+    const pot = readPot();
+    return (bb && pot != null) ? pot / bb : null;
+  };
+
+  const actionRoots = () =>
+    ACTION_ROOT_SELECTORS.map((sel) => document.querySelector(sel)).filter(Boolean);
+
   // 콜/체크 버튼 찾기: 클래스 토큰 → 버튼 텍스트 순. (스킨·언어가 달라도 잡히도록)
   function findActionButton(kind) {
-    const roots = ACTION_ROOT_SELECTORS.map((sel) => document.querySelector(sel)).filter(Boolean);
-    roots.push(document);
+    const roots = actionRoots();
     const clsRe = new RegExp('\\b' + kind + '\\b');
     for (const root of roots) {
       const btns = Array.from(root.querySelectorAll('button, .action-button, [role="button"]'));
@@ -411,8 +432,7 @@
   // 레이즈/베트 버튼 찾기 (PokerNow: .raise/.bet, 텍스트 "Raise"/"Bet"/"레이즈")
   // plainOnly=true 면 금액이 적히지 않은 버튼만 (= 패널을 여는 용도) 돌려준다.
   function findRaiseButton(plainOnly) {
-    const roots = ACTION_ROOT_SELECTORS.map((s) => document.querySelector(s)).filter(Boolean);
-    roots.push(document);
+    const roots = actionRoots();
     const clsRe = /\b(raise|bet|all-in|allin)\b/;
     const ok = (el) => isClickable(el) && !(plainOnly && /\d/.test(el.textContent || ''));
     for (const root of roots) {
@@ -538,6 +558,10 @@
       if (!ok) dumpActionArea();
       if (done) done(ok, why);
     };
+    if (!extensionAlive()) return finish(false, '확장 컨텍스트가 종료됨 · 전송 안 함');
+    if (!Number.isFinite(targetChips) || targetChips <= 0) {
+      return finish(false, '레이즈 금액이 유효하지 않음 · 전송 안 함');
+    }
     const bb = getBigBlind();
     if (!bb) return finish(false, '블라인드를 못 읽음 · 전송 안 함');
     const bets = readBets();
@@ -547,6 +571,7 @@
     const intendedAllIn = targetChips >= allIn * 0.98;
 
     const apply = () => {
+      if (!extensionAlive()) return finish(false, '확장 컨텍스트가 종료됨 · 전송 안 함');
       const f = findAmountInputs();
       const inp = f.num || f.range;
       if (!inp) {                      // 금액칸이 끝내 없다 (올인 강제 등)
@@ -577,6 +602,7 @@
       // React 가 다시 그릴 틈을 주고, 전송 직전에 실제 입력값을 재검증한다.
       // 값이 안 들어갔으면 확인 버튼을 누르지 않는다 (엉뚱한 금액 전송 방지)
       setTimeout(() => {
+        if (!extensionAlive()) return finish(false, '확장 컨텍스트가 종료됨 · 전송 안 함');
         const actual = parseFloat(String(inp.value).replace(/,/g, ''));
         const matched = isFinite(actual) && Math.abs(actual - v) <= Math.max(1, v * 0.02);
         if (!matched) return finish(false, '금액 반영 실패 · 전송 안 함');
@@ -592,10 +618,10 @@
     //   ("Raise to 600")은 누르는 순간 그 금액으로 전송돼버리기 때문.
     const now = findAmountInputs();
     if (now.num || now.range) return apply();
-    const plain = findRaiseButton(true);
-    const opener = plain || findRaiseButton();
-    if (!opener) return finish(false, '레이즈 버튼 없음');
-    if (!plain) log('경고: 금액이 적힌 버튼밖에 없어 그대로 눌린다 —', opener.textContent);
+    const opener = findRaiseButton(true);
+    // 금액이 적힌 버튼은 클릭 순간 그 금액으로 전송될 수 있다.
+    // 금액 입력 UI를 여는 일반 레이즈 버튼이 없으면 중단한다.
+    if (!opener) return finish(false, '금액 입력을 여는 레이즈 버튼 없음 · 전송 안 함');
     opener.click();
     let tries = 0;
     const wait = () => {
@@ -733,6 +759,33 @@
     return null;
   }
 
+  function hasBlindRoleClass(seat, role) {
+    if (!seat) return false;
+    const re = role === 'BB'
+      ? /\b(?:big[-_]?blind|bb)\b/i
+      : /\b(?:small[-_]?blind|sb)\b/i;
+    if (re.test(String(seat.className || ''))) return true;
+    return Array.from(seat.querySelectorAll('[class*="blind"], [class*="Blind"]'))
+      .some((el) => re.test(String(el.className || '')));
+  }
+
+  // 같은 금액을 낸 림퍼가 있으면 금액만으로 BB를 특정할 수 없다.
+  // 이때는 클래스 힌트가 있거나 후보가 하나일 때만 확정한다.
+  function uniqueBlindPos(seats, bets, value, role) {
+    if (!value) return null;
+    const candidates = seats.filter((pos) => {
+      const v = bets.get(pos);
+      return v != null && Math.abs(v - value) <= Math.max(0.01, value * 0.05);
+    });
+    const hinted = candidates.filter((pos) => {
+      const seat = Array.from(document.querySelectorAll('.table-player'))
+        .find((el) => seatPosOf(el) === pos);
+      return hasBlindRoleClass(seat, role);
+    });
+    if (hinted.length === 1) return hinted[0];
+    return candidates.length === 1 ? candidates[0] : null;
+  }
+
   // (2) 블라인드로 확정: SB 바로 다음 자리가 BB 인 쪽이 진행 방향. (프리플랍에서만)
   //     동시에 내가 SB/BB 였는지도 기록해 둔다 (방향을 몰라도 쓸 수 있는 정보).
   function learnSeatDir(seats, boardLen) {
@@ -745,17 +798,15 @@
     const { sb, bb } = getBlinds();
     if (!sb || !bb || sb === bb) return;
     const bets = seatBetMap();
-    let sbPos = null, bbPos = null;
-    for (const pos of seats) {
-      const v = bets.get(pos);
-      if (v === bb) bbPos = pos;
-      else if (v === sb) sbPos = pos;
-    }
+    const sbPos = uniqueBlindPos(seats, bets, sb, 'SB');
+    const bbPos = uniqueBlindPos(seats, bets, bb, 'BB');
 
     const heroPos = seatPosOf(heroSeat());
     if (heroPos != null && heroBlindRole == null) {
       if (heroPos === bbPos) heroBlindRole = 'BB';
       else if (heroPos === sbPos) heroBlindRole = 'SB';
+      else if (hasBlindRoleClass(heroSeat(), 'BB')) heroBlindRole = 'BB';
+      else if (hasBlindRoleClass(heroSeat(), 'SB')) heroBlindRole = 'SB';
     }
 
     if (seatDirSrc === 'blinds' || sbPos == null || bbPos == null) return;
@@ -834,7 +885,10 @@
     const ctn = hero && hero.querySelector(TIMER_SELECTOR);
     if (!ctn) return null;
     let pct = 0, found = false;
-    for (const bar of ctn.querySelectorAll('.normal-time, .time-bank')) {
+    const bars = Array.from(ctn.querySelectorAll('.normal-time, .time-bank'))
+      .filter((bar) => !bar.parentElement ||
+        !bar.parentElement.closest('.normal-time, .time-bank'));
+    for (const bar of bars) {
       const w = parseFloat(bar.style.width);
       if (!isNaN(w)) { pct += w; found = true; }
     }
@@ -964,6 +1018,7 @@
       autoAct.armedKey = null; autoAct.armedHow = null; autoAct.armedEl = null;
       autoAct.tryKey = null; autoAct.tries = 0; autoAct.verifyFail = 0;
       autoAct.runTries = {};
+      autoAct.busyKey = null;
       handStartStack = (idleStack != null) ? idleStack : stack;
       handSeats = new Set();
       heroBlindRole = null;
@@ -990,7 +1045,7 @@
     // GTO 판단 (HUD 권장 표시 + 자동 실행용)
     let gto = null;
     if (settings.gtoMode && hand && window.PNHAGTO) {
-      const potBB = (bb && stack != null) ? readPot() / bb : null;
+      const potBB = readPotBB(bb);
       const bets = readBets();
       gto = window.PNHAGTO.decide({
         c1, c2, hand, position, board,
@@ -1600,7 +1655,9 @@
       try { btn = document.querySelector(sel); } catch (e) {}
       if (btn && isClickable(btn)) return btn;
     }
-    const candidates = Array.from(document.querySelectorAll('button, [role="button"], .action-button'));
+    // 액션 영역 밖의 채팅/도움말/오버레이 버튼을 폴드 버튼으로 오인하지 않는다.
+    const candidates = actionRoots().flatMap((root) =>
+      Array.from(root.querySelectorAll('button, [role="button"], .action-button')));
     // 정확히 "Fold" → 사전 액션 "...fold..." 순으로 시도
     for (const el of candidates) {
       const t = (el.textContent || '').trim().toLowerCase();
@@ -1608,7 +1665,7 @@
     }
     for (const el of candidates) {
       const t = (el.textContent || '').trim().toLowerCase();
-      if (t.includes('fold') && isClickable(el)) return el;
+      if ((t.includes('fold') || t.includes('폴드')) && isClickable(el)) return el;
     }
     return null;
   }
@@ -1629,6 +1686,7 @@
    * (예전엔 오버레이 버튼만 이 상태를 갱신해서, F 키로 예약하면 패널은 계속
    *  "미리 폴드" 라고 표시됐다.) */
   function performFold() {
+    if (!extensionAlive()) return { ok: false, myTurn: false, armed: false };
     const myTurn = isMyTurn();
     const wasArmed = !myTurn && (preFoldArmed || isFoldArmedInDom());
     if (!clickFoldButton()) return { ok: false, myTurn, armed: preFoldArmed };
@@ -1673,6 +1731,7 @@
 
   if (FOLD_HOTKEY) {
     document.addEventListener('keydown', (e) => {
+      if (!extensionAlive()) return;
       if (e.ctrlKey || e.altKey || e.metaKey || isTypingTarget(e.target)) return;
       if ((e.key || '').toLowerCase() !== FOLD_HOTKEY.toLowerCase()) return;
       const r = performFold();
@@ -1721,25 +1780,33 @@
     paintAuto();
   }
 
-  // 취소 버튼: 예약을 풀고, 이번 핸드는 다시 예약하지 않는다
-  function cancelAutoForHand(msg) {
-    const wasArmed = isArmed();
-    cancelAutoAct();
-    if (wasArmed && !isMyTurn()) {
-      // 사전 액션은 토글 — 예약할 때 누른 "그 버튼" 을 다시 눌러야 풀린다.
-      // 버튼이 stale(재렌더로 죽은 참조)일 수 있으므로 같은 종류의 버튼인지 확인 후,
-      // 아니면 지금 화면의 사전 폴드 버튼을 다시 찾아 누른다.
+  // 확장이 직접 눌러둔 사전 액션만 해제한다. 사용자가 별도로 걸어둔
+  // PokerNow 예약까지 건드리지 않도록 armedKey/preFoldArmed를 기준으로 한다.
+  function disarmOwnedPreFold() {
+    const owned = !!autoAct.armedKey || preFoldArmed;
+    if (!owned) return false;
+
+    if (!isMyTurn()) {
       const el = autoAct.armedEl;
       const stillSame = el && document.contains(el) && isClickable(el) &&
         /fold|폴드/.test((el.textContent || '').toLowerCase());
       if (stillSame) el.click();
       else {
         const pf = findPreFoldButton();
-        if (pf) pf.click(); else clickFoldButton();
+        if (pf) pf.click();
       }
-      preFoldArmed = false;
     }
-    autoAct.armedKey = null; autoAct.armedHow = null; autoAct.armedEl = null;
+    preFoldArmed = false;
+    autoAct.armedKey = null;
+    autoAct.armedHow = null;
+    autoAct.armedEl = null;
+    return true;
+  }
+
+  // 취소 버튼: 예약을 풀고, 이번 핸드는 다시 예약하지 않는다
+  function cancelAutoForHand(msg) {
+    cancelAutoAct();
+    disarmOwnedPreFold();
     autoAct.cancelKey = lastRawKey;
     setAutoMsg(msg || '자동 폴드 취소함', 2000);
     paintAuto();
@@ -1749,7 +1816,8 @@
   // 나중에 취소할 수 있도록 실제로 누른 버튼을 함께 돌려준다.
   function armPreFold() {
     if (settings.autoCheckFree) {
-      const cands = document.querySelectorAll('button, [role="button"], .action-button');
+      const cands = actionRoots().flatMap((root) =>
+        Array.from(root.querySelectorAll('button, [role="button"], .action-button')));
       for (const el of cands) {
         const t = (el.textContent || '').trim().toLowerCase().replace(/\s+/g, '');
         if (/(check\/?fold|체크\/?폴드)/.test(t) && isClickable(el)) {
@@ -1767,8 +1835,7 @@
   // 지금 화면에 있는 "사전 폴드(미리 폴드)" 버튼을 찾는다 (Check/Fold 우선).
   // 취소 시 저장된 버튼이 stale 해졌을 때의 폴백. 즉시 폴드 버튼과 구분해 누른다.
   function findPreFoldButton() {
-    const roots = ACTION_ROOT_SELECTORS.map((s) => document.querySelector(s)).filter(Boolean);
-    roots.push(document);
+    const roots = actionRoots();
     for (const root of roots) {
       for (const b of root.querySelectorAll('button, .action-button, [role="button"]')) {
         const t = (b.textContent || '').trim().toLowerCase().replace(/\s+/g, '');
@@ -1787,11 +1854,17 @@
   function maybeAutoAct(ctx) {
     // GTO 모드는 그 자체가 "내 차례에 알아서 누른다" 는 뜻이라 자동 폴드와 별개로 동작한다.
     // (예전엔 자동 폴드까지 같이 켜야만 GTO 가 눌렀다 — 켠 줄 알았는데 아무것도 안 하는 원인)
-    if (!settings.autoFold && !settings.gtoMode) { cancelAutoAct(); return; }
-    if (!ctx.actOk) { cancelAutoAct(); return; }   // 블라인드/홀카드 신뢰 불가 → 자동 액션 정지
+    if (!settings.autoFold && !settings.gtoMode) {
+      cancelAutoAct(); disarmOwnedPreFold(); return;
+    }
+    if (!ctx.actOk) {
+      cancelAutoAct(); disarmOwnedPreFold(); return;
+    }   // 블라인드/홀카드 신뢰 불가 → 자동 액션 정지
     if (settings.gtoMode) { maybeAutoGto(ctx); return; }  // GTO 경로
-    if (ctx.allowed) { cancelAutoAct(); return; }                    // 지정 핸드 → 내가 직접
-    if (settings.autoPreflopOnly && ctx.boardLen >= 3) { cancelAutoAct(); return; }
+    if (ctx.allowed) { cancelAutoAct(); disarmOwnedPreFold(); return; }                    // 지정 핸드 → 내가 직접
+    if (settings.autoPreflopOnly && ctx.boardLen >= 3) {
+      cancelAutoAct(); disarmOwnedPreFold(); return;
+    }
     if (autoAct.cancelKey === ctx.key) { cancelAutoAct(); return; }  // 사용자가 취소한 핸드
 
     const sk = streetKey(ctx.key, ctx.boardLen);
@@ -1878,6 +1951,7 @@
 
     if (autoAct.doneKey === sk) return;                 // 이 스트리트는 이미 실행함
     if (autoAct.timer && autoAct.key === sk) return;    // 이미 예약됨
+    if (autoAct.busyKey === sk) return;                 // 레이즈 입력/확인 진행 중
 
     const dec = ctx.gto;
     if (!dec) return;
@@ -1913,7 +1987,7 @@
       learnSeatDir(seats, board.length);
       const position = heroPositionName(seats);
       const action = getActionInfo(stack);
-      const potBB = bb ? readPot() / bb : null;
+      const potBB = readPotBB(bb);
       const bets = readBets();
       return window.PNHAGTO.decide({
         c1, c2, hand, position, board,
@@ -1937,6 +2011,7 @@
     autoAct.key = null; autoAct.dueAt = 0; autoAct.plan = null;
 
     // 실행 직전에 조건을 처음부터 다시 확인한다 (기다리는 사이 상황이 바뀔 수 있다)
+    if (!extensionAlive()) return;
     if (!settings.enabled || (!settings.autoFold && !settings.gtoMode)) return;
     if (autoAct.cancelKey === lastRawKey) return;
     if (!isMyTurn() || isHeroFolded()) return;
@@ -1952,7 +2027,8 @@
       if (!dec) return;
       action = dec.action; reason = dec.reason || '';
       if (action === 'wait' || (action === 'raise' && settings.gtoAggro !== 'auto')) {
-        setAutoMsg('🤖 GTO: 레이즈 권장 · 직접 누르세요', 2500);
+        const hint = action === 'wait' ? (reason || '판단 보류') : '레이즈 권장';
+        setAutoMsg('🤖 GTO: ' + hint + ' · 직접 확인하세요', 2500);
         return;
       }
     } else {
@@ -1970,11 +2046,24 @@
         return;
       }
       const toBB = bb ? fmtBB(target / bb) + 'BB' : String(target);
-      autoAct.doneKey = sk;                       // 한 스트리트에 두 번 올리지 않는다
+      autoAct.busyKey = sk;                        // 비동기 금액 입력 중 중복 실행 방지
       setAutoMsg('🤖 레이즈 ' + toBB + ' …', 4000);
       log('자동 레이즈 시도:', hand, reason, target + '칩 (' + toBB + ')');
       performRaise(target, (ok2, why) => {
-        setAutoMsg(ok2 ? '🤖 자동 레이즈함 · ' + toBB : '🤖 레이즈 실패: ' + why, 3000);
+        if (autoAct.busyKey === sk) autoAct.busyKey = null;
+        if (ok2) {
+          autoAct.doneKey = sk;                    // 성공했을 때만 완료 처리
+          setAutoMsg('🤖 자동 레이즈함 · ' + toBB, 3000);
+        } else {
+          const n = (autoAct.runTries[sk] = (autoAct.runTries[sk] || 0) + 1);
+          if (n >= 3) {
+            autoAct.doneKey = sk;
+            setAutoMsg('🤖 레이즈 실패 · 재시도 포기: ' + why, 3000);
+          } else {
+            autoAct.doneKey = null;
+            setAutoMsg('🤖 레이즈 실패 · 재시도: ' + why, 2500);
+          }
+        }
         detectMyHand();
       });
       return;
@@ -2006,12 +2095,14 @@
   // 내 차례에 카운트다운이 도는 중이라면, 페이지를 직접 조작한 순간 취소한다.
   // (예약만 걸려 있는 상태는 여기서 풀지 않는다 — 취소 버튼으로만 푼다.)
   document.addEventListener('mousedown', (e) => {
+    if (!extensionAlive()) return;
     if (!autoAct.timer) return;
     const box = document.getElementById(OVERLAY_ID);
     if (box && box.contains(e.target)) return;   // 패널 자체 조작은 취소로 보지 않음
     abortAutoTimer('내가 직접 조작 → 자동 취소');
   }, true);
   document.addEventListener('keydown', () => {
+    if (!extensionAlive()) return;
     if (autoAct.timer) abortAutoTimer('내가 직접 조작 → 자동 취소');
   }, true);
 
@@ -2048,6 +2139,7 @@
     if (autoTickTimer) { clearTimeout(autoTickTimer); autoTickTimer = null; }
     if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
     if (autoAct.timer) { clearTimeout(autoAct.timer); autoAct.timer = null; }
+    autoAct.busyKey = null;
     removeOverlay();
   }
 

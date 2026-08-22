@@ -295,7 +295,14 @@
         if (ctx.aggroAuto && pos !== 'BB') {
           return { action: 'raise', reason: dead ? '아이솔' : '오픈', sizeBB: sizeOf(dead ? 'iso' : 'open') };
         }
-        return { action: 'call', reason: '림프 콜' };
+        // 레이즈를 수동으로 두었다고 해서 RFI 핸드를 자동 림프하면 안 된다.
+        // 사용자가 직접 오픈할 수 있도록 wait로 표시한다.
+        return {
+          action: 'wait',
+          reason: dead ? '아이솔 권장' : '오픈 권장',
+          sizeBB: sizeOf(dead ? 'iso' : 'open'),
+          confident: false
+        };
       }
       return { action: 'fold', reason: '림프 폴드', confident: true };
     }
@@ -318,7 +325,8 @@
   function equityCached(c1, c2, board, rangeStr, iterations) {
     const key = rangeStr + '|' +
       [c1.rank + c1.suit, c2.rank + c2.suit].sort().join('|') +
-      '#' + board.map((c) => c.rank + c.suit).sort().join('');
+      '#' + board.map((c) => c.rank + c.suit).sort().join('') +
+      '|n=' + (Number(iterations) || 1200);
     const now = Date.now();
     if (eqCache && eqCache.key === key && now - eqCache.t < 4000) return eqCache.e;
     const e = equityVsRange([c1, c2], board, buildRange(rangeStr).combos, iterations);

@@ -111,7 +111,12 @@ function save() {
 /* 다른 화면(팝업·오버레이)에서 핸드 목록이 바뀌면 따라간다 */
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local' || !changes.settings) return;
-  selected = new Set(PNHA.merge(changes.settings.newValue).hands);
+  const s = PNHA.merge(changes.settings.newValue);
+  selected = new Set(s.hands);
+  // 팝업에서 GTO 설정을 바꾼 경우에도 옵션 페이지의 체크 상태를 동기화한다.
+  el('gtoMode').checked = !!s.gtoMode;
+  el('gtoStreetAll').checked = s.gtoStreet === 'all';
+  el('gtoAggroAuto').checked = s.gtoAggro === 'auto';
   refreshSelection();
 });
 

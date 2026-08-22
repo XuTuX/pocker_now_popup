@@ -118,7 +118,7 @@
     return out;
   }
 
-  // 카드 배열(숫자 랭크) → 최고 족보 { cat, high, kick }
+  // 카드 배열(숫자 랭크) → 최고 족보 { cat, high, kick, tiebreak }
   //   cat: 8 스트플 · 7 포카드 · 6 풀하우스 · 5 플러시 · 4 스트레이트
   //        3 트리플 · 2 투페어 · 1 원페어 · 0 하이카드
   function evalMade(cards) {
@@ -138,24 +138,56 @@
       return 0;
     };
 
-    let flushSuit = null;
-    for (const s in sc) if (sc[s].length >= 5) flushSuit = s;
-    if (flushSuit) { const h = straightHigh(sc[flushSuit]); if (h) return { cat: 8, high: h }; }
+    const flushes = Object.keys(sc)
+      .filter((s) => sc[s].length >= 5)
+      .map((s) => sc[s].slice().sort((a, b) => b - a));
+    const compareTuple = (a, b) => {
+      for (let i = 0; i < Math.max(a.length, b.length); i++) {
+        const d = (a[i] || 0) - (b[i] || 0);
+        if (d) return d;
+      }
+      return 0;
+    };
+    let flushRanks = null;
+    for (const ranksForSuit of flushes) {
+      if (!flushRanks || compareTuple(ranksForSuit, flushRanks) > 0) flushRanks = ranksForSuit;
+    }
+    if (flushRanks) {
+      const h = straightHigh(flushRanks);
+      if (h) return { cat: 8, high: h, kick: 0, tiebreak: [h] };
+    }
 
     const byN = (n) => Object.keys(rc).map(Number).filter((r) => rc[r] === n).sort((a, b) => b - a);
     const quads = byN(4), trips = byN(3), pairs = byN(2);
     const uniq = [...new Set(ranks)].sort((a, b) => b - a);
 
-    if (quads.length) return { cat: 7, high: quads[0], kick: uniq.find((r) => r !== quads[0]) || 0 };
+    if (quads.length) {
+      const kicker = uniq.find((r) => r !== quads[0]) || 0;
+      return { cat: 7, high: quads[0], kick: kicker, tiebreak: [quads[0], kicker] };
+    }
     if (trips.length && (pairs.length || trips.length >= 2))
-      return { cat: 6, high: trips[0], kick: trips.length >= 2 ? trips[1] : pairs[0] };
-    if (flushSuit) return { cat: 5, high: sc[flushSuit].slice().sort((a, b) => b - a)[0] };
+      return {
+        cat: 6,
+        high: trips[0],
+        kick: trips.length >= 2 ? trips[1] : pairs[0],
+        tiebreak: [trips[0], trips.length >= 2 ? trips[1] : pairs[0]]
+      };
+    if (flushRanks) return { cat: 5, high: flushRanks[0], kick: flushRanks[1] || 0, tiebreak: flushRanks.slice(0, 5) };
     const st = straightHigh(ranks);
-    if (st) return { cat: 4, high: st };
-    if (trips.length) return { cat: 3, high: trips[0] };
-    if (pairs.length >= 2) return { cat: 2, high: pairs[0], kick: pairs[1] };
-    if (pairs.length === 1) return { cat: 1, high: pairs[0], kick: uniq.find((r) => r !== pairs[0]) || 0 };
-    return { cat: 0, high: uniq[0], kick: uniq[1] || 0 };
+    if (st) return { cat: 4, high: st, kick: 0, tiebreak: [st] };
+    if (trips.length) {
+      const kickers = uniq.filter((r) => r !== trips[0]).slice(0, 2);
+      return { cat: 3, high: trips[0], kick: kickers[0] || 0, tiebreak: [trips[0], ...kickers] };
+    }
+    if (pairs.length >= 2) {
+      const kicker = uniq.find((r) => r !== pairs[0] && r !== pairs[1]) || 0;
+      return { cat: 2, high: pairs[0], kick: pairs[1], tiebreak: [pairs[0], pairs[1], kicker] };
+    }
+    if (pairs.length === 1) {
+      const kickers = uniq.filter((r) => r !== pairs[0]).slice(0, 3);
+      return { cat: 1, high: pairs[0], kick: kickers[0] || 0, tiebreak: [pairs[0], ...kickers] };
+    }
+    return { cat: 0, high: uniq[0] || 0, kick: uniq[1] || 0, tiebreak: uniq.slice(0, 5) };
   }
 
   const MADE_NAMES = {
@@ -178,7 +210,7 @@
     else if (m.cat === 4 || m.cat === 8) name += ' ' + hi + ' high';
     else name += ' ' + hi;                                // 원페어 K, 트리플 8, 하이카드 A …
 
-    const sameTuple = m.cat === b.cat && m.high === b.high && (m.kick || 0) === (b.kick || 0);
+    const sameTuple = rankCompare(m, b) === 0;
     const klass = m.cat >= 4 ? 'made-strong' : m.cat >= 1 ? 'made-mid' : 'made-weak';
     return { name, klass, usesHole: !sameTuple };
   }
@@ -271,8 +303,13 @@
   // 족보 비교: >0 이면 a 가 이김, 0 이면 비김
   function rankCompare(a, b) {
     if (a.cat !== b.cat) return a.cat - b.cat;
-    if (a.high !== b.high) return a.high - b.high;
-    return (a.kick || 0) - (b.kick || 0);
+    const aa = a.tiebreak || [a.high || 0, a.kick || 0];
+    const bb = b.tiebreak || [b.high || 0, b.kick || 0];
+    for (let i = 0; i < Math.max(aa.length, bb.length); i++) {
+      const d = (aa[i] || 0) - (bb[i] || 0);
+      if (d) return d;
+    }
+    return 0;
   }
 
   // 몬테카를로 에퀴티.

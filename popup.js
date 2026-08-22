@@ -136,8 +136,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
   // 오버레이의 🤖 버튼으로 켜고 끈 것도 팝업에 반영
   if (changes.settings) {
     settings = PNHA.merge(changes.settings.newValue);
-    renderStatusText();
-    renderAuto();
+    // 옵션 페이지에서 핸드 목록을 바꾼 경우에도 체크박스 UI를 다시 그린다.
+    // 일부 필드만 갱신하면 다음 팝업 저장 때 오래된 목록으로 덮어쓸 수 있다.
+    render();
   }
 });
 
@@ -162,7 +163,9 @@ function findPokerNowTab(callback) {
     'https://*.pokernow.club/*',
     'https://pokernow.club/*'
   ];
-  chrome.tabs.query({ url: urls }, (tabs) => {
+  // 여러 브라우저 창에 PokerNow가 열려 있어도 현재 포커스된 창의
+  // 활성 탭만 대상으로 한다. 다른 창의 테이블에 Fold를 보내면 안 된다.
+  chrome.tabs.query({ url: urls, lastFocusedWindow: true }, (tabs) => {
     if (!tabs || !tabs.length) return callback(null);
     callback(tabs.find((t) => t.active) || tabs[0]);
   });
